@@ -1,0 +1,56 @@
+# X9U-style init-started KeyMint/keystore2 and eSE/OMAPI/Weaver on platform Binder.
+# PLP110 adapts its OEM QSEE and hardware file view without a second manager.
+on post-fs-data
+    start plp110-qsee
+
+on property:sys.plp110.qsee=ready
+    start plp110-keymint
+    start plp110-keymint-publish
+    start plp110-ese
+    start plp110-omapi
+    start plp110-weaver
+
+on property:sys.plp110.keymint=ready
+    start keystore2
+
+service plp110-qsee /system/bin/sh /system/libexec/plp110-fbe/bin/start
+    disabled
+    oneshot
+    user root
+    stdio_to_kmsg
+    seclabel u:r:recovery:s0
+
+service plp110-keymint /system/libexec/plp110-fbe/bin/hal keymint
+    disabled
+    oneshot
+    user root
+    stdio_to_kmsg
+    seclabel u:r:recovery:s0
+
+service plp110-keymint-publish /system/libexec/plp110-fbe/bin/hal publish-keymint
+    disabled
+    oneshot
+    user root
+    stdio_to_kmsg
+    seclabel u:r:recovery:s0
+
+service plp110-ese /system/libexec/plp110-fbe/bin/hal ese
+    disabled
+    oneshot
+    user root
+    stdio_to_kmsg
+    seclabel u:r:recovery:s0
+
+service plp110-omapi /system/libexec/plp110-fbe/bin/hal omapi
+    disabled
+    oneshot
+    user root
+    stdio_to_kmsg
+    seclabel u:r:recovery:s0
+
+service plp110-weaver /system/libexec/plp110-fbe/bin/hal weaver
+    disabled
+    oneshot
+    user root
+    stdio_to_kmsg
+    seclabel u:r:recovery:s0

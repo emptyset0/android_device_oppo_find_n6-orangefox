@@ -1,0 +1,107 @@
+{
+  "purpose": "bounded RAM-only touch diagnostic, NOT flashable",
+  "source_service_sha256": "e05489a5d9158bee775375c3f9f9c129cebe6cf859bdd7fad99ffe3295a3f2b6",
+  "patches": [
+    {
+      "path": "system/bin/hbp5-service",
+      "original_sha256": "e05489a5d9158bee775375c3f9f9c129cebe6cf859bdd7fad99ffe3295a3f2b6",
+      "patched_sha256": "d4c94d1381d783f55d0740faa6c59d427ccb18df8d9505a70e9a907f3a6543eb",
+      "patches": [
+        {
+          "symbol": "_ZN10AfeLibrary19doFwReflashUnlockedEv",
+          "va": "0x25e2c",
+          "offset": 155180,
+          "original": "3f2303d5fd7bbaa9fc0b00f9",
+          "patched": "5f2403d500008012c0035fd6"
+        }
+      ]
+    },
+    {
+      "path": "vendor/firmware/tp/swangoose/libafe_gt9966.so",
+      "original_sha256": "eb8be8a72059bb2b82f8b720154a50b0d796e01f3b6c9b0bcf7eeaf39b9c143c",
+      "patched_sha256": "1f49b7c32e8372aff88f2550e5244b21f6fbb939f4b9998b8fcd0bd0337112eb",
+      "patches": [
+        {
+          "symbol": "afe_dev_do_fw_reflash",
+          "va": "0xc198",
+          "offset": 45464,
+          "original": "fd7bbda9f65701a9fd030091",
+          "patched": "5f2403d500008012c0035fd6"
+        },
+        {
+          "symbol": "gdix_fw_update_proc",
+          "va": "0xe3f0",
+          "offset": 54256,
+          "original": "ff4304d1fd7b0ba9fdc30291",
+          "patched": "5f2403d500008012c0035fd6"
+        },
+        {
+          "symbol": "gdix_send_config",
+          "va": "0x1247c",
+          "offset": 70780,
+          "original": "ff8301d1fd7b01a9fd430091",
+          "patched": "5f2403d500008012c0035fd6"
+        },
+        {
+          "symbol": "gdix_send_config_by_isp",
+          "va": "0x128bc",
+          "offset": 71868,
+          "original": "ee0f16fced33016deb2b026d",
+          "patched": "5f2403d500008012c0035fd6"
+        },
+        {
+          "symbol": "afe_dev_do_factory_test",
+          "va": "0xc214",
+          "offset": 45588,
+          "original": "fd7bbba9fa6701a9fd030091",
+          "patched": "5f2403d500008012c0035fd6"
+        }
+      ]
+    },
+    {
+      "path": "vendor/firmware/tp/swangoose/libafe_gt9916.so",
+      "original_sha256": "eb8be8a72059bb2b82f8b720154a50b0d796e01f3b6c9b0bcf7eeaf39b9c143c",
+      "patched_sha256": "1f49b7c32e8372aff88f2550e5244b21f6fbb939f4b9998b8fcd0bd0337112eb",
+      "patches": [
+        {
+          "symbol": "afe_dev_do_fw_reflash",
+          "va": "0xc198",
+          "offset": 45464,
+          "original": "fd7bbda9f65701a9fd030091",
+          "patched": "5f2403d500008012c0035fd6"
+        },
+        {
+          "symbol": "gdix_fw_update_proc",
+          "va": "0xe3f0",
+          "offset": 54256,
+          "original": "ff4304d1fd7b0ba9fdc30291",
+          "patched": "5f2403d500008012c0035fd6"
+        },
+        {
+          "symbol": "gdix_send_config",
+          "va": "0x1247c",
+          "offset": 70780,
+          "original": "ff8301d1fd7b01a9fd430091",
+          "patched": "5f2403d500008012c0035fd6"
+        },
+        {
+          "symbol": "gdix_send_config_by_isp",
+          "va": "0x128bc",
+          "offset": 71868,
+          "original": "ee0f16fced33016deb2b026d",
+          "patched": "5f2403d500008012c0035fd6"
+        },
+        {
+          "symbol": "afe_dev_do_factory_test",
+          "va": "0xc214",
+          "offset": 45588,
+          "original": "fd7bbba9fa6701a9fd030091",
+          "patched": "5f2403d500008012c0035fd6"
+        }
+      ]
+    }
+  ],
+  "dependency_missing": {},
+  "firmware_images_included": false,
+  "caution": "Static guards cover identified update/config entry points; functional validation is still required."
+}

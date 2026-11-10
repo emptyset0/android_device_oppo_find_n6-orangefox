@@ -1,0 +1,23 @@
+# X9U starts its Qualcomm BootControl/Health services from the ramdisk.
+# Use the PLP110 OTA equivalents on the same platform Binder as fastbootd.
+on post-fs-data
+    start vendor.boot-qti
+    start vendor.health-default
+
+service vendor.boot-qti /system/bin/linker64 /vendor/bin/hw/android.hardware.boot-service.qti
+    class hal
+    disabled
+    user root
+    group root
+    seclabel u:r:recovery:s0
+    setenv LD_LIBRARY_PATH /system/lib64:/vendor/lib64:/vendor/lib64/hw
+
+service vendor.health-default /system/bin/linker64 /vendor/bin/hw/android.hardware.health-service.qti
+    class hal
+    disabled
+    user system
+    group system
+    capabilities WAKE_ALARM BLOCK_SUSPEND
+    file /dev/kmsg w
+    seclabel u:r:recovery:s0
+    setenv LD_LIBRARY_PATH /system/lib64:/vendor/lib64:/vendor/lib64/hw

@@ -1,0 +1,1633 @@
+diff --git a/data.cpp b/data.cpp
+index f67a0ec..5255f26 100644
+--- a/data.cpp
++++ b/data.cpp
+@@ -1370,8 +1370,19 @@ void DataManager::SetDefaultValues()
+   string findbright;
+ #ifdef TW_BRIGHTNESS_PATH
+   findbright = EXPAND(TW_BRIGHTNESS_PATH);
++  // PLP110 backlight nodes may register after DataManager's early defaults,
++  // during the first DRM modeset. Keep the known per-panel path instead of
++  // falling back to the other screen or permanently disabling brightness.
++  const bool plp110_panel_path = findbright == "/sys/class/backlight/panel1-backlight/brightness";
++  if (plp110_panel_path) {
++    char inner[PROPERTY_VALUE_MAX];
++    property_get("vendor.recovery.inner.enable", inner, "0");
++    findbright = strcmp(inner, "1") == 0 ?
++        "/sys/class/backlight/panel0-backlight/brightness" :
++        "/sys/class/backlight/panel1-backlight/brightness";
++  }
+   LOGINFO("TW_BRIGHTNESS_PATH := %s\n", findbright.c_str());
+-  if (!TWFunc::Path_Exists(findbright))
++  if (!TWFunc::Path_Exists(findbright) && !plp110_panel_path)
+     {
+       LOGINFO("Specified brightness file '%s' not found.\n",
+ 	      findbright.c_str());
+diff --git a/fox_fifo/fox_channel.cpp b/fox_fifo/fox_channel.cpp
+index d17c403..7228a9d 100644
+--- a/fox_fifo/fox_channel.cpp
++++ b/fox_fifo/fox_channel.cpp
+@@ -47,7 +47,7 @@ void setup_command_fifo()
+ 		return;
+ 	}
+ 
+-	g_input_fd = open(FOX_INPUT_FILE, O_RDONLY | O_NONBLOCK);
++	g_input_fd = open(FOX_INPUT_FILE, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+ 	if (g_input_fd < 0) {
+ 		LOGINFO("Unable to open %s\n", FOX_INPUT_FILE);
+ 		unlink(FOX_INPUT_FILE);
+@@ -68,7 +68,7 @@ void setup_cancel_fifo()
+ 		set_select_fd();
+ 		return;
+ 	}
+-	g_cancel_fd = open(FOX_CANCEL_FILE, O_RDONLY | O_NONBLOCK);
++	g_cancel_fd = open(FOX_CANCEL_FILE, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+ 	if (g_cancel_fd < 0) {
+ 		LOGINFO("Unable to open %s\n", FOX_CANCEL_FILE);
+ 		unlink(FOX_CANCEL_FILE);
+@@ -160,7 +160,8 @@ void Fox_Channel::HandleInput()
+ 
+ 	Fox_Rpc_Request request = Fox_Protocol::ParseRequestJson(buffer);
+ 
+-	FILE* out = fopen(FOX_OUTPUT_FILE, "w");
++	// Executed daemons (e.g. NTFS-3G) must not retain the reply FIFO.
++	FILE* out = fopen(FOX_OUTPUT_FILE, "we");
+ 	if (!out) {
+ 		close_input_fd();
+ 		set_select_fd();
+diff --git a/fox_fifo/fox_fifo.cpp b/fox_fifo/fox_fifo.cpp
+index 37d768a..9fccd7c 100644
+--- a/fox_fifo/fox_fifo.cpp
++++ b/fox_fifo/fox_fifo.cpp
+@@ -329,7 +329,7 @@ int Fox_Fifo::Cmd_Flash(const Json::Value& args) {
+ 	// Reflash OrangeFox after a successful flash when enabled (default mirrors
+ 	// the GUI's tw_auto_reflashtwrp). The direct installer path above does not
+ 	// trigger the auto-reflash that the GUI flash flow performs, so do it here.
+-	if (rc == 0 && DataManager::GetIntValue(TW_AUTO_REFLASHTWRP_VAR) != 0) {
++	if (rc == 0 && !N6HasPendingOta() && DataManager::GetIntValue(TW_AUTO_REFLASHTWRP_VAR) != 0) {
+ 		twrpRepacker repacker;
+ 		if (!repacker.Flash_Current_Twrp())
+ 			gui_print("fox: warning: OrangeFox reflash failed\n");
+@@ -441,7 +441,7 @@ int Fox_Fifo::Cmd_Restore(const Json::Value& args) {
+ 	}
+ 
+ 	PartitionManager.Mount_All_Storage();
+-	DataManager::SetValue(TW_SKIP_DIGEST_CHECK_VAR, skip_digest ? 1 : 0);
++	DataManager::SetValue(TW_SKIP_DIGEST_CHECK_VAR, skip_digest ? 0 : 1);
+ 
+ 	// Resolve the backup folder: absolute path used directly, otherwise resolved
+ 	// against the backups folder of each mounted storage (mirrors ORS restore).
+@@ -967,7 +967,8 @@ int Fox_Fifo::Cmd_Storages(const Json::Value& /*args*/) {
+ 		Json::Value item(Json::objectValue);
+ 		item["mount_point"] = storage.Mount_Point;
+ 		item["display_name"] = storage.Display_Name;
+-		item["mounted"] = storage.Mount_Point == current;  // "selected" storage
++		item["mounted"] = PartitionManager.Is_Mounted_By_Path(storage.Mount_Point) != 0;
++		item["selected"] = storage.Mount_Point == current;
+ 		item["extra"] = storage.isFiles ? "files" : "block";
+ 		items.append(item);
+ 	}
+diff --git a/gui/action.cpp b/gui/action.cpp
+index bd5da25..c772dec 100644
+--- a/gui/action.cpp
++++ b/gui/action.cpp
+@@ -529,6 +529,9 @@ int GUIAction::flash_zip(std::string filename, int *wipe_cache)
+       ret_val = TWinstall_zip(filename.c_str(), wipe_cache);
+       PartitionManager.Unlock_Block_Partitions();
+ 
++      if (N6HasPendingOta())
++        return ret_val;
++
+       // Now, check if we need to ensure TWRP remains installed...
+       struct stat st;
+       if (stat("/system/bin/installTwrp", &st) == 0)
+@@ -704,6 +707,10 @@ void GUIAction::operation_end(const int operation_status)
+ 
+ int GUIAction::reboot(std::string arg)
+ {
++  // Check here as well as the shared reboot function: on failure the GUI
++  // must stay alive rather than exiting before the error can be seen.
++  if (!N6CommitPendingOta())
++    return -1;
+   sync();
+   DataManager::SetValue("tw_gui_done", 1);
+   DataManager::SetValue("tw_reboot_arg", arg);
+@@ -1543,6 +1550,9 @@ int GUIAction::flash(std::string arg)
+ 	  break;
+ 	}
+ 
++      if (N6HasPendingOta())
++        break; // Do not run further queued ZIPs before the next boot.
++
+       // success - but what have we just installed?
+       if (Fox_Zip_Installer_Code != 0) // we have just installed a ROM - ideally, the user should reboot the recovery
+        {
+@@ -1563,7 +1573,8 @@ int GUIAction::flash(std::string arg)
+    DataManager::Vibrate("tw_action_vibrate");
+    DataManager::Leds(true);
+ 
+-   reinject_after_flash(); // ** redundant code
++   if (!N6HasPendingOta())
++     reinject_after_flash(); // ** redundant code
+    PartitionManager.Update_System_Details();
+    operation_end(ret_val);
+    DataManager::SetValue(FOX_INSTALL_PREBUILT_ZIP, 0); // if we have installed an internal zip, turn off the flag
+@@ -2165,7 +2176,7 @@ int GUIAction::adbsideload(std::string arg __unused)
+ 			if (ret == -2)
+ 				gui_msg("need_new_adb=You need adb 1.0.32 or newer to sideload to this device.");
+ 			ret = 1; // failure
+-		} else {
++		} else if (!N6HasPendingOta()) {
+ 			int wipe_cache = 0;
+ 			int wipe_dalvik = 0;
+ 			DataManager::GetValue("tw_wipe_dalvik", wipe_dalvik);
+@@ -2176,7 +2187,8 @@ int GUIAction::adbsideload(std::string arg __unused)
+ 		}
+ 		TWFunc::Fox_Property_Set("ctl.start", "adbd");
+ 		TWFunc::Toggle_MTP(mtp_was_enabled);
+-		reinject_after_flash();
++		if (!N6HasPendingOta())
++			reinject_after_flash();
+ 		operation_end(ret);
+ 	}
+ 	return 0;
+diff --git a/gui/gui.cpp b/gui/gui.cpp
+index a3eb4fd..04eecee 100644
+--- a/gui/gui.cpp
++++ b/gui/gui.cpp
+@@ -736,9 +736,15 @@ static void loopTimer(int input_timeout_ms)
+ 			return;
+ 		}
+ 
+-		// We need to sleep some period time microseconds
+-		//unsigned int sleepTime = 33333 -(diff.tv_nsec / 1000);
+-		//usleep(sleepTime); // removed so we can scan for input
++		// A page that requests continuous updates keeps input_timeout_ms at
++		// zero. Polling in a tight loop until the next frame consumes a core
++		// even with no input. Keep the frame deadline, but yield for at most
++		// four milliseconds after an empty poll.
++		if (!got_event && diff.tv_nsec < timeout) {
++			const long remaining = timeout - diff.tv_nsec;
++			const timespec pause{0, remaining < 4000000L ? remaining : 4000000L};
++			nanosleep(&pause, nullptr);
++		}
+ 		input_timeout_ms = 0;
+ 	} while (1);
+ }
+diff --git a/minuitwrp/events.cpp b/minuitwrp/events.cpp
+index e497df6..85c78e3 100644
+--- a/minuitwrp/events.cpp
++++ b/minuitwrp/events.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include <stdio.h>
++#include <cutils/properties.h>
+ #include <stdlib.h>
+ #include <fcntl.h>
+ #include <dirent.h>
+@@ -126,7 +127,7 @@ static struct pollfd ev_fds[MAX_DEVICES];
+ static struct ev evs[MAX_DEVICES];
+ static unsigned ev_count = 0;
+ static struct timeval lastInputStat;
+-static time_t lastInputMTime;
++static struct timespec lastInputMTime = {0, 0};
+ static int has_mouse = 0;
+ 
+ static inline int ABS(int x) {
+@@ -376,6 +377,10 @@ int ev_init(void)
+     int fd;
+ 
+     has_mouse = 0;
++    // Save the directory stamp BEFORE scanning: nodes added during readdir
++    // must cause a subsequent rescan rather than being accidentally missed.
++    struct stat input_before;
++    const bool input_before_valid = stat("/dev/input", &input_before) == 0;
+ 
+ 	dir = opendir("/dev/input");
+     if(dir != 0) {
+@@ -387,7 +392,8 @@ int ev_init(void)
+             fd = openat(dirfd(dir), de->d_name, O_RDONLY);
+             if(fd < 0) continue;
+ 
+-			ev_fds[ev_count].fd = fd;
++			memset(&evs[ev_count], 0, sizeof(evs[ev_count]));
++            ev_fds[ev_count].fd = fd;
+             ev_fds[ev_count].events = POLLIN;
+             evs[ev_count].fd = &ev_fds[ev_count];
+ 
+@@ -404,8 +410,10 @@ int ev_init(void)
+     }
+ 
+     struct stat st;
+-    if(stat("/dev/input", &st) >= 0)
+-        lastInputMTime = st.st_mtime;
++    if (input_before_valid)
++        lastInputMTime = input_before.st_mtim;
++    else if (stat("/dev/input", &st) >= 0)
++        lastInputMTime = st.st_mtim;
+     gettimeofday(&lastInputStat, NULL);
+ 
+     return 0;
+@@ -484,6 +492,19 @@ static int vk_modify(struct ev *e, struct input_event *ev)
+ 
+     // This is used to ditch useless event handlers, like an accelerometer
+     if (e->ignored)     return 1;
++    // Both native touch fixes are retained. Ignore inner-panel input by
++    // default, independently of reported framebuffer size. Startup-only flag.
++    static const bool inner_enabled = []() {
++        char value[PROPERTY_VALUE_MAX];
++        property_get("vendor.recovery.inner.enable", value, "0");
++        return strcmp(value, "1") == 0;
++    }();
++    if ((strcmp(e->deviceName, "touchpanel") == 0 || strcmp(e->deviceName, "touchpanel_pen") == 0) && !inner_enabled) return 1;
++    if ((strcmp(e->deviceName, "touchpanel") == 0 || strcmp(e->deviceName, "touchpanel_pen") == 0) &&
++        gr_fb_width() == 1140 && gr_fb_height() == 2616) return 1;
++    if ((strcmp(e->deviceName, "touchpanel1") == 0 || strcmp(e->deviceName, "touchpanel_pen1") == 0) &&
++        ((gr_fb_width() == 2248 && gr_fb_height() == 2480) ||
++         (gr_fb_width() == 2480 && gr_fb_height() == 2248))) return 1;
+ 
+     if (ev->type == EV_REL && ev->code == REL_Z)
+     {
+@@ -818,13 +839,15 @@ int ev_get(struct input_event *ev, int timeout_ms)
+     if(curr.tv_sec - lastInputStat.tv_sec >= 2)
+     {
+         struct stat st;
+-        stat("/dev/input", &st);
+-        if (st.st_mtime > lastInputMTime)
++        const bool input_changed = stat("/dev/input", &st) == 0 &&
++            (st.st_mtim.tv_sec != lastInputMTime.tv_sec ||
++             st.st_mtim.tv_nsec != lastInputMTime.tv_nsec);
++        if (input_changed)
+         {
+             LOGI("Reloading input devices\n");
+             ev_exit();
+             ev_init();
+-            lastInputMTime = st.st_mtime;
++            // ev_init recorded its own pre-scan nanosecond stamp.
+         }
+         lastInputStat = curr;
+     }
+diff --git a/minuitwrp/graphics.cpp b/minuitwrp/graphics.cpp
+index 959b366..7d088c5 100644
+--- a/minuitwrp/graphics.cpp
++++ b/minuitwrp/graphics.cpp
+@@ -638,7 +638,19 @@ int gr_init(void)
+     snprintf(default_rotation, 4, "%d", TW_ROTATION);
+ #endif
+     property_get("persist.twrp.rotation", gr_rotation_string, default_rotation);
++    // Per-panel display orientation, not touch-coordinate compensation.
++    // DSI-1: logical 2248x2480, native GT9966 axes. DSI-2 remains 1140x2616.
++    char panel_string[PROPERTY_VALUE_MAX];
++    char inner_enabled[PROPERTY_VALUE_MAX];
++    property_get("vendor.recovery.inner.enable", inner_enabled, "0");
++    snprintf(panel_string, sizeof(panel_string), "%d", strcmp(inner_enabled, "1") == 0 ? 1 : 2);
++    if (atoi(panel_string) == 1) {
++        property_get("vendor.recovery.inner.rotation", gr_rotation_string, "270");
++    } else if (atoi(panel_string) == 2) {
++        snprintf(gr_rotation_string, sizeof(gr_rotation_string), "0");
++    }
+     gr_rotation = atoi(gr_rotation_string);
++    printf("PLP110 display-only rotation=%u DSI=%s\n", gr_rotation, panel_string);
+     if (!(gr_rotation == 90 || gr_rotation == 180 || gr_rotation == 270))
+         gr_rotation = 0;
+ 
+diff --git a/minuitwrp/graphics_drm.cpp b/minuitwrp/graphics_drm.cpp
+index 0cc80f5..02b002b 100644
+--- a/minuitwrp/graphics_drm.cpp
++++ b/minuitwrp/graphics_drm.cpp
+@@ -760,6 +760,26 @@ static drmModeCrtc *find_crtc_for_connector(int fd,
+                             drmModeRes *resources,
+                             drmModeConnector *connector) {
+     drmModeEncoder *encoder;
++    // Keep the OEM primary/secondary pipeline association. After a failed or
++    // blanked boot, encoder->crtc_id may be zero; choosing the first possible
++    // CRTC then drives DSI-2 through the primary panel's vendor hooks.
++    if (connector->connector_type == DRM_MODE_CONNECTOR_DSI &&
++        connector->connector_type_id >= 1 && connector->connector_type_id <= 2) {
++        uint32_t index = connector->connector_type_id - 1;
++        if (index < static_cast<uint32_t>(resources->count_crtcs)) {
++            for (int i = 0; i < connector->count_encoders; ++i) {
++                encoder = drmModeGetEncoder(fd, connector->encoders[i]);
++                if (!encoder) continue;
++                bool supported = encoder->possible_crtcs & (1U << index);
++                drmModeFreeEncoder(encoder);
++                if (supported) {
++                    printf("PLP110 DSI-%u dedicated CRTC=%u index=%u\n",
++                           connector->connector_type_id, resources->crtcs[index], index);
++                    return drmModeGetCrtc(fd, resources->crtcs[index]);
++                }
++            }
++        }
++    }
+     /*
+      * Find the encoder. If we already have one, just use it.
+      */
+@@ -843,7 +863,24 @@ static drmModeConnector *find_main_monitor(int fd, drmModeRes *resources,
+ 
+     drmModeConnector *main_monitor_connector = nullptr;
+     unsigned i = 0;
+-    do {
++    // Fixed panel policy: outer by default. Inner fixes remain available only
++    // with explicit opt-in before GUI startup; never follow a hinge sensor.
++    const bool inner_enabled = android::base::GetProperty("vendor.recovery.inner.enable", "0") == "1";
++    const int requested_dsi = inner_enabled ? 1 : 2;
++    if (requested_dsi > 0) {
++        for (int n = 0; n < resources->count_connectors; ++n) {
++            drmModeConnector* c = drmModeGetConnector(fd, resources->connectors[n]);
++            if (c && c->connector_type == DRM_MODE_CONNECTOR_DSI &&
++                c->connector_type_id == static_cast<uint32_t>(requested_dsi) &&
++                c->connection == DRM_MODE_CONNECTED && c->count_modes > 0) {
++                main_monitor_connector = c;
++                printf("PLP110 selected DSI-%d connector=%u\n", requested_dsi, c->connector_id);
++                break;
++            }
++            if (c) drmModeFreeConnector(c);
++        }
++    }
++    if (!main_monitor_connector) do {
+         main_monitor_connector = find_used_connector_by_type(fd,
+                                          resources,
+                                          kConnectorPriority[i]);
+@@ -859,6 +896,14 @@ static drmModeConnector *find_main_monitor(int fd, drmModeRes *resources,
+     if (!main_monitor_connector)
+         return nullptr;
+ 
++    // Generic connector fallback must not silently enable the other panel.
++    if (main_monitor_connector->connector_type != DRM_MODE_CONNECTOR_DSI ||
++        main_monitor_connector->connector_type_id != static_cast<uint32_t>(requested_dsi)) {
++        printf("PLP110 requested DSI-%d unavailable; refusing other panel\n", requested_dsi);
++        drmModeFreeConnector(main_monitor_connector);
++        return nullptr;
++    }
++
+     *mode_index = 0;
+     for (int modes = 0; modes < main_monitor_connector->count_modes; modes++) {
+         if (main_monitor_connector->modes[modes].type &
+@@ -871,31 +916,178 @@ static drmModeConnector *find_main_monitor(int fd, drmModeRes *resources,
+     return main_monitor_connector;
+ }
+ 
+-static void disable_non_main_crtcs(int fd,
+-                    drmModeRes *resources,
+-                    drmModeCrtc* main_crtc) {
+-  uint32_t prop_id;
+-  drmModeAtomicReqPtr atomic_req = drmModeAtomicAlloc();
+-  for (int i = 0; i < resources->count_connectors; i++) {
+-    drmModeConnector* connector = drmModeGetConnector(fd, resources->connectors[i]);
+-    drmModeCrtc* crtc = find_crtc_for_connector(fd, resources, connector);
+-    if (crtc->crtc_id != main_crtc->crtc_id) {
+-      // Switching to atomic commit. Given only crtc, we can only set ACTIVE = 0
+-      // to disable any Nonmain CRTCs
+-      find_prop_id(&crtc_res, crtc, Crtc, crtc->crtc_id, "ACTIVE", prop_id);
+-      if (prop_id == 0)
+-        return;
+-
+-      if (drmModeAtomicAddProperty(atomic_req, main_monitor_crtc->crtc_id, prop_id, 0) < 0)
+-        return;
++static uint32_t probe_object_property(int fd, uint32_t id, uint32_t type, const char* name) {
++  drmModeObjectProperties* props = drmModeObjectGetProperties(fd, id, type);
++  if (!props) return 0;
++  uint32_t result = 0;
++  for (uint32_t n = 0; n < props->count_props; ++n) {
++    drmModePropertyRes* prop = drmModeGetProperty(fd, props->props[n]);
++    if (prop) {
++      if (!strcmp(prop->name, name)) result = prop->prop_id;
++      drmModeFreeProperty(prop);
++    }
++    if (result) break;
++  }
++  drmModeFreeObjectProperties(props);
++  return result;
++}
+ 
++// PLP110 A.26's splash uses separate SSPPs for the two DSI pipelines. The
++// driver's private splash ownership outlives an atomic FB_ID/CRTC_ID clear.
++// Do not move either pair across CRTCs. The first real commit on the selected
++// CRTC hands over that display's splash using its own two planes.
++static uint32_t plp110_plane_id(uint32_t i) {
++  const uint32_t outer[] = {146, 150};
++  const uint32_t inner[] = {109, 142};
++  return main_monitor_connector->connector_type_id == 2 ? outer[i] : inner[i];
++}
++
++// A disconnected atomic connector can still be showing bootloader GRAM.
++// Reattach the inner panel to its original CRTC with a black framebuffer
++// before disabling it through the normal bridge/panel shutdown sequence.
++// Never draw Fox or enable inner touch in this path.
++static bool retire_inner_splash(int fd, drmModeRes* resources) {
++  if (main_monitor_connector->connector_type_id != 2) return true;
++  if (resources->count_crtcs < 2) return false;
++  drmModeConnector* inner = nullptr;
++  for (int i = 0; i < resources->count_connectors; ++i) {
++    auto* c = drmModeGetConnector(fd, resources->connectors[i]);
++    if (!c) continue;
++    if (c->connector_type == DRM_MODE_CONNECTOR_DSI && c->connector_type_id == 1 &&
++        c->connection == DRM_MODE_CONNECTED && c->count_modes) {
++      inner = c;
++      break;
+     }
+-    drmModeFreeCrtc(crtc);
++    drmModeFreeConnector(c);
++  }
++  if (!inner) return false;
++  const uint32_t crtc = resources->crtcs[0];
++  const uint32_t pipes[] = {109, 142};
++  uint32_t dpms = DRM_MODE_DPMS_ON;
++  for (int i = 0; i < inner->count_props; ++i) {
++    auto* p = drmModeGetProperty(fd, inner->props[i]);
++    if (!p) continue;
++    if (!strcmp(p->name, "DPMS")) dpms = inner->prop_values[i];
++    drmModeFreeProperty(p);
++  }
++  if (dpms == DRM_MODE_DPMS_OFF) {
++    drmModeFreeConnector(inner);
++    return true;
++  }
++  auto mode = inner->modes[0];
++  for (int i = 0; i < inner->count_modes; ++i) {
++    if (inner->modes[i].type & DRM_MODE_TYPE_PREFERRED) { mode = inner->modes[i]; break; }
++  }
++  if (mode.hdisplay != 2480 || mode.vdisplay != 2248 || crtc != 219 ||
++      main_monitor_crtc->crtc_id != 287) {
++    drmModeFreeConnector(inner);
++    return false;
+   }
+-  if (drmModeAtomicCommit(drm_fd, atomic_req,DRM_MODE_ATOMIC_ALLOW_MODESET, NULL))
+-    printf("Atomic Commit failed in DisableNonMainCrtcs\n");
++  for (uint32_t id : pipes) {
++    auto* p = drmModeGetPlane(fd, id);
++    bool ok = p && (p->possible_crtcs & 1) && (!p->crtc_id || p->crtc_id == crtc);
++    if (p) drmModeFreePlane(p);
++    if (!ok) { drmModeFreeConnector(inner); return false; }
++  }
++  auto* black = drm_create_surface(mode.hdisplay, mode.vdisplay);
++  uint32_t blob = 0;
++  bool ok = black && !drmModeCreatePropertyBlob(fd, &mode, sizeof(mode), &blob);
++  if (ok) memset(black->base.data, 0, black->base.height * black->base.row_bytes);
++  auto make_request = [&](bool enable) {
++    auto* req = drmModeAtomicAlloc();
++    if (!req) return req;
++    bool good = true;
++    auto add = [&](uint32_t id, uint32_t type, const char* name, uint64_t v) {
++      uint32_t prop = probe_object_property(fd, id, type, name);
++      if (!prop || drmModeAtomicAddProperty(req, id, prop, v) < 0) good = false;
++    };
++    add(inner->connector_id, DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID", enable ? crtc : 0);
++    add(crtc, DRM_MODE_OBJECT_CRTC, "MODE_ID", enable ? blob : 0);
++    add(crtc, DRM_MODE_OBJECT_CRTC, "ACTIVE", enable);
++    const uint32_t w = mode.hdisplay / 2;
++    for (uint32_t i = 0; i < 2; ++i) {
++      const uint32_t p = pipes[i], t = DRM_MODE_OBJECT_PLANE;
++      add(p, t, "FB_ID", enable ? black->fb_id : 0);
++      add(p, t, "CRTC_ID", enable ? crtc : 0);
++      if (!enable) continue;
++      add(p, t, "CRTC_X", w*i);
++      add(p, t, "CRTC_Y", 0);
++      add(p, t, "CRTC_W", w);
++      add(p, t, "CRTC_H", mode.vdisplay);
++      add(p, t, "SRC_X", (w*i)<<16);
++      add(p, t, "SRC_Y", 0);
++      add(p, t, "SRC_W", w<<16);
++      add(p, t, "SRC_H", uint32_t(mode.vdisplay)<<16);
++    }
++    if (!good) { drmModeAtomicFree(req); return static_cast<drmModeAtomicReqPtr>(nullptr); }
++    return req;
++  };
++  if (ok) {
++    const uint32_t flags = DRM_MODE_ATOMIC_ALLOW_MODESET;
++    auto* on = make_request(true);
++    auto* off = make_request(false);
++    int ret = (on && off) ? drmModeAtomicCommit(fd, on, flags | DRM_MODE_ATOMIC_TEST_ONLY, nullptr)
++                          : -EINVAL;
++    if (!ret) {
++      ret = drmModeAtomicCommit(fd, on, flags, nullptr);
++      if (!ret) {
++        printf("PLP110 inner splash: black takeover committed\n");
++        ret = drmModeAtomicCommit(fd, off, flags, nullptr);
++      }
++    }
++    if (on) drmModeAtomicFree(on);
++    if (off) drmModeAtomicFree(off);
++    ok = !ret;
++    if (!ok) printf("PLP110 inner splash handoff failed rc=%d\n", ret);
++  }
++  if (blob) drmModeDestroyPropertyBlob(fd, blob);
++  drm_destroy_surface(black);
++  drmModeFreeConnector(inner);
++  if (ok) printf("PLP110 inner splash: disable committed\n");
++  return ok;
++}
+ 
+-  drmModeAtomicFree(atomic_req);
++// Recovery is the only display client. Drop the unselected DRM state without
++// disabling/re-enabling the selected DSI panel during the splash transition.
++static bool release_boot_display_state(int fd, drmModeRes* resources) {
++  drmModeAtomicReqPtr req = drmModeAtomicAlloc();
++  if (!req) return false;
++  bool valid = true;
++  auto clear = [&](uint32_t object, uint32_t type, const char* name) {
++    uint32_t prop = probe_object_property(fd, object, type, name);
++    if (!prop || drmModeAtomicAddProperty(req, object, prop, 0) < 0) valid = false;
++  };
++  drmModePlaneRes* planes = drmModeGetPlaneResources(fd);
++  if (!planes) { drmModeAtomicFree(req); return false; }
++  for (uint32_t i = 0; i < planes->count_planes; ++i) {
++    if (planes->planes[i] == plp110_plane_id(0) ||
++        planes->planes[i] == plp110_plane_id(1)) continue;
++    clear(planes->planes[i], DRM_MODE_OBJECT_PLANE, "FB_ID");
++    clear(planes->planes[i], DRM_MODE_OBJECT_PLANE, "CRTC_ID");
++  }
++  drmModeFreePlaneResources(planes);
++  for (int i = 0; i < resources->count_connectors; ++i) {
++    if (resources->connectors[i] == main_monitor_connector->connector_id) continue;
++    clear(resources->connectors[i], DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID");
++  }
++  for (int i = 0; i < resources->count_crtcs; ++i) {
++    if (resources->crtcs[i] == main_monitor_crtc->crtc_id) continue;
++    clear(resources->crtcs[i], DRM_MODE_OBJECT_CRTC, "ACTIVE");
++    clear(resources->crtcs[i], DRM_MODE_OBJECT_CRTC, "MODE_ID");
++  }
++  int ret = valid ? drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, nullptr) : -EINVAL;
++  drmModeAtomicFree(req);
++  if (ret) printf("PLP110 boot display handoff failed ret=%d errno=%d\n", ret, errno);
++  else {
++    printf("PLP110 boot display handoff: unselected DRM state cleared\n");
++    // Also extinguish the unselected panel's inherited splash backlight.
++    const char* inactive = main_monitor_connector->connector_type_id == 2 ?
++        "/sys/class/backlight/panel0-backlight/brightness" :
++        "/sys/class/backlight/panel1-backlight/brightness";
++    int bl = open(inactive, O_WRONLY | O_CLOEXEC);
++    if (bl >= 0) { if (write(bl, "0", 1) != 1) perror("inactive panel backlight"); close(bl); }
++  }
++  return ret == 0;
+ }
+ 
+ static void update_plane_fb() {
+@@ -953,6 +1145,12 @@ static GRSurface* drm_init(minui_backend* backend __unused) {
+       continue;
+ 
+     }
++    // Atomic-only properties are hidden until this capability is set. The
++    // original late setup made splash cleanup silently do nothing at cold boot.
++    if (drmSetClientCap(drm_fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) ||
++        drmSetClientCap(drm_fd, DRM_CLIENT_CAP_ATOMIC, 1)) {
++      close(drm_fd); drm_fd = -1; continue;
++    }
+     res = drmModeGetResources(drm_fd);
+     if (!res) {
+       close(drm_fd);
+@@ -993,7 +1191,12 @@ static GRSurface* drm_init(minui_backend* backend __unused) {
+     return nullptr;
+   }
+ 
+-  disable_non_main_crtcs(drm_fd, res, main_monitor_crtc);
++  if (!retire_inner_splash(drm_fd, res)) {
++    printf("PLP110 inner splash could not be retired; continue outer rescue UI\n");
++  }
++  if (!release_boot_display_state(drm_fd, res)) {
++    drmModeFreeResources(res); close(drm_fd); drm_fd = -1; return nullptr;
++  }
+ 
+   main_monitor_crtc->mode = main_monitor_connector->modes[selected_mode];
+ 
+@@ -1038,8 +1241,6 @@ static GRSurface* drm_init(minui_backend* backend __unused) {
+ 
+   current_buffer = 0;
+ 
+-  drmSetClientCap(drm_fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
+-  drmSetClientCap(drm_fd, DRM_CLIENT_CAP_ATOMIC, 1);
+ 
+  /* Get possible plane_ids */
+   drmModePlaneRes *plane_options = drmModeGetPlaneResources(drm_fd);
+@@ -1097,12 +1298,27 @@ static GRSurface* drm_init(minui_backend* backend __unused) {
+     }
+   }
+ 
+-  /* Set plane resources */
++  /* Use the board's measured splash pipe pairs, not global enumeration order. */
++  if (number_of_lms != 2) {
++    printf("PLP110 unexpected display topology: %u mixers\n", number_of_lms);
++    drmModeFreePlaneResources(plane_options);
++    return nullptr;
++  }
++  const uint32_t target_mask = 1U << (main_monitor_connector->connector_type_id - 1);
+   for(uint32_t i = 0; i < number_of_lms; ++i) {
+-    plane_res[i].plane = drmModeGetPlane(drm_fd, plane_options->planes[i]);
+-    if (!plane_res[i].plane)
+-      return NULL;
++    auto* plane = drmModeGetPlane(drm_fd, plp110_plane_id(i));
++    if (!plane || !(plane->possible_crtcs & target_mask) ||
++        (plane->crtc_id && plane->crtc_id != main_monitor_crtc->crtc_id)) {
++      printf("PLP110 plane %u incompatible with CRTC %u\n",
++             plp110_plane_id(i), main_monitor_crtc->crtc_id);
++      if (plane) drmModeFreePlane(plane);
++      drmModeFreePlaneResources(plane_options);
++      return nullptr;
++    }
++    plane_res[i].plane = plane;
+   }
++  printf("PLP110 DSI-%u planes=%u,%u\n", main_monitor_connector->connector_type_id,
++         plp110_plane_id(0), plp110_plane_id(1));
+ 
+   for (uint32_t i = 0; i < number_of_lms; ++i) {
+     struct Plane *obj = &plane_res[i];
+@@ -1141,7 +1357,19 @@ static GRSurface* drm_init(minui_backend* backend __unused) {
+   prop_id = find_plane_prop_id(plane_res[0].plane->plane_id, "FB_ID", plane_res);
+   fb_prop_id = prop_id;
+ 
+-  drm_blank(nullptr, false);
++  drmModeAtomicReqPtr initial = drmModeAtomicAlloc();
++  int ret = initial ? setup_pipeline(initial) : -ENOMEM;
++  if (!ret) ret = drmModeAtomicCommit(drm_fd, initial,
++      DRM_MODE_ATOMIC_ALLOW_MODESET | DRM_MODE_ATOMIC_TEST_ONLY, nullptr);
++  if (!ret) ret = drmModeAtomicCommit(drm_fd, initial,
++      DRM_MODE_ATOMIC_ALLOW_MODESET, nullptr);
++  if (initial) drmModeAtomicFree(initial);
++  if (ret) {
++    printf("PLP110 initial DRM commit failed, rc=%d\n", ret);
++    return nullptr;  // Do not run the DRM flip loop on a failed modeset.
++  }
++  current_blank_state = false;
++  printf("Atomic Commit succeed\n");
+ 
+   return draw_buf;
+ }
+diff --git a/openrecoveryscript.cpp b/openrecoveryscript.cpp
+index 3b8d3e4..d35fda3 100755
+--- a/openrecoveryscript.cpp
++++ b/openrecoveryscript.cpp
+@@ -214,7 +214,7 @@ int OpenRecoveryScript::run_script_file(void) {
+ 				// Restore
+ 				DataManager::SetValue("tw_action_text2", gui_parse_text("{@restore}"));
+ 				PartitionManager.Mount_All_Storage();
+-				DataManager::SetValue(TW_SKIP_DIGEST_CHECK_VAR, 0);
++				DataManager::SetValue(TW_SKIP_DIGEST_CHECK_VAR, 1);
+ 				char folder_path[512], partitions[512];
+ 
+ 				string val = value, restore_folder, restore_partitions;
+@@ -297,7 +297,7 @@ int OpenRecoveryScript::run_script_file(void) {
+ 							Restore_List += "/sd-ext;";
+ 							gui_msg("sdext=SD-EXT");
+ 						} else if (value2[i] == 'M' || value2[i] == 'm') {
+-							DataManager::SetValue(TW_SKIP_DIGEST_CHECK_VAR, 1);
++							DataManager::SetValue(TW_SKIP_DIGEST_CHECK_VAR, 0);
+ 							gui_msg("digest_check_skip=Digest check skip is on");
+ 						}
+ 					}
+@@ -383,19 +383,19 @@ int OpenRecoveryScript::run_script_file(void) {
+ 				}
+ 			} else if (strcmp(command, "reboot") == 0) {
+ 				if (strlen(value) && strcmp(value, "recovery") == 0)
+-					TWFunc::tw_reboot(rb_recovery);
++					ret_val = TWFunc::tw_reboot(rb_recovery);
+ 				else if (strlen(value) && strcmp(value, "poweroff") == 0)
+-					TWFunc::tw_reboot(rb_poweroff);
++					ret_val = TWFunc::tw_reboot(rb_poweroff);
+ 				else if (strlen(value) && strcmp(value, "bootloader") == 0)
+-					TWFunc::tw_reboot(rb_bootloader);
++					ret_val = TWFunc::tw_reboot(rb_bootloader);
+ 				else if (strlen(value) && strcmp(value, "download") == 0)
+-					TWFunc::tw_reboot(rb_download);
++					ret_val = TWFunc::tw_reboot(rb_download);
+ 				else if (strlen(value) && strcmp(value, "edl") == 0)
+-					TWFunc::tw_reboot(rb_edl);
++					ret_val = TWFunc::tw_reboot(rb_edl);
+ 				else if (strlen(value) && strcmp(value, "fastboot") == 0)
+-					TWFunc::tw_reboot(rb_fastboot);
++					ret_val = TWFunc::tw_reboot(rb_fastboot);
+ 				else
+-					TWFunc::tw_reboot(rb_system);
++					ret_val = TWFunc::tw_reboot(rb_system);
+ 			} else if (strcmp(command, "cmd") == 0) {
+ 				DataManager::SetValue("tw_action_text2", gui_parse_text("{@running_command}"));
+ 				if (cindex != 0) {
+@@ -406,46 +406,27 @@ int OpenRecoveryScript::run_script_file(void) {
+ 			} else if (strcmp(command, "print") == 0) {
+ 				gui_print("%s\n", value);
+ 			} else if (strcmp(command, "sideload") == 0) {
+-				// ADB Sideload
+ 				DataManager::SetValue("tw_action_text2", gui_parse_text("{@sideload}"));
+ 				install_cmd = -1;
+-
+-				int wipe_cache = 0;
+-				string result;
+-				// pid_t sideload_child_pid;
+-
++				const bool mtp_was_enabled = TWFunc::Toggle_MTP(false);
+ 				gui_msg("start_sideload=Starting ADB sideload feature...");
+-
+-				// ret_val = apply_from_adb("/", &sideload_child_pid);
+ 				Device::BuiltinAction reboot_action = Device::REBOOT_BOOTLOADER;
++				// twrp_sideload already installs the ZIP and joins minadbd.
+ 				ret_val = twrp_sideload("/", &reboot_action);
+ 				if (ret_val != 0) {
+ 					if (ret_val == -2)
+ 						gui_err("need_new_adb=You need adb 1.0.32 or newer to sideload to this device.");
+-					ret_val = 1; // failure
+-				} else if (TWinstall_zip(FUSE_SIDELOAD_HOST_PATHNAME, &wipe_cache) == 0) {
+-					if (wipe_cache)
+-						PartitionManager.Wipe_By_Path("/cache");
+-				} else {
+-					ret_val = 1; // failure
+-				}
+-				PartitionManager.Unlock_Block_Partitions();
+-				PartitionManager.Update_System_Details();
+-				sideload = 1; // Causes device to go to the home screen afterwards
+-
+-				pid_t sideload_child_pid = GetMiniAdbdPid();
+-				if (sideload_child_pid != 0) {
+-					LOGINFO("Signaling child sideload process to exit.\n");
+-					struct stat st;
+-					// Calling stat() on this magic filename signals the minadbd
+-					// subprocess to shut down.
+-					stat(FUSE_SIDELOAD_HOST_EXIT_PATHNAME, &st);
+-					int status;
+-					LOGINFO("Waiting for child sideload process to exit.\n");
+-					waitpid(sideload_child_pid, &status, 0);
++					ret_val = 1;
+ 				}
+-
++				sideload = 1;
+ 				property_set("ctl.start", "adbd");
++				TWFunc::Toggle_MTP(mtp_was_enabled);
++				// Preserve the live updater's snapshot mappings. The GUI
++				// sideload path likewise does not rescan them on handoff.
++				if (!N6HasPendingOta()) {
++					PartitionManager.Unlock_Block_Partitions();
++					PartitionManager.Update_System_Details();
++				}
+ 				gui_msg("done=Done.");
+ 			} else if (strcmp(command, "fixperms") == 0 || strcmp(command, "fixpermissions") == 0 || strcmp(command, "fixcontexts") == 0) {
+ 				ret_val = PartitionManager.Fix_Contexts();
+@@ -737,7 +718,10 @@ int OpenRecoveryScript::Run_OpenRecoveryScript_Action() {
+        		else
+        		  {    
+  		     usleep(2000000); // Sleep for 2 seconds before rebooting
+-		     TWFunc::tw_reboot(rb_system);
++		     if (TWFunc::tw_reboot(rb_system) != 0) {
++		       DataManager::SetValue("tw_page_done", 1);
++		       return 1;
++		     }
+ 		     usleep(5000000); // Sleep for 5 seconds to allow reboot to occur
+ 		  }
+            } else {
+diff --git a/orangefox.cpp b/orangefox.cpp
+index d171fe5..187625d 100644
+--- a/orangefox.cpp
++++ b/orangefox.cpp
+@@ -1073,6 +1073,9 @@ int Fox_Prepare_Update_Binary(const char *path, ZipArchiveHandle Zip)
+ 
+ void Fox_Post_Zip_Install(const int result)
+ {
++   if (N6HasPendingOta())
++     return; // Do not reflash the old Fox or patch boot images in this window.
++
+    if (result != INSTALL_SUCCESS)
+    	return;
+ 
+diff --git a/partitionmanager.cpp b/partitionmanager.cpp
+index 2fe6694..9c9051d 100755
+--- a/partitionmanager.cpp
++++ b/partitionmanager.cpp
+@@ -1,3 +1,4 @@
++#include "otg_sysfs_match.h"
+ /*
+ 	Copyright 2014 to 2021 TeamWin
+ 	This file is part of TWRP/TeamWin Recovery Project.
+@@ -37,6 +38,7 @@
+ #include <iostream>
+ #include <iomanip>
+ #include <sys/wait.h>
++#include <android/binder_manager.h>
+ #include <linux/fs.h>
+ #include <sys/mount.h>
+ #include <sys/poll.h>
+@@ -45,6 +47,7 @@
+ #include <sys/types.h>
+ #include <linux/types.h>
+ #include <linux/netlink.h>
++#include <cutils/android_filesystem_config.h>
+ #include <android-base/chrono_utils.h>
+ #include <android-base/file.h>
+ #include <android-base/logging.h>
+@@ -64,6 +67,7 @@
+ #include "variables.h"
+ #include "twcommon.h"
+ #include "partitions.hpp"
++#include "twinstall.h"
+ #include "data.hpp"
+ #include "startupArgs.hpp"
+ #include "twrp-functions.hpp"
+@@ -681,9 +685,24 @@ void TWPartitionManager::Decrypt_Data() {
+ 			Set_Crypto_Type("file");
+ #ifdef TW_INCLUDE_FBE_METADATA_DECRYPT
+ #ifdef USE_FSCRYPT
++			// Do not block the entire recovery if a required OEM service failed.
++			if (!android::base::WaitForProperty("sys.plp110.keymint", "ready", std::chrono::seconds(18))) {
++				LOGERR("PLP110 KeyMint did not start; leaving encrypted Data untouched\n");
++				return;
++			}
++			const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(6);
++			for (;;) {
++				AIBinder* ks = AServiceManager_checkService("android.system.keystore2.IKeystoreService/default");
++				if (ks) { AIBinder_decStrong(ks); break; }
++				if (std::chrono::steady_clock::now() >= until) {
++					LOGERR("keystore2 unavailable; leaving encrypted Data untouched\n");
++					return;
++				}
++				usleep(100000);
++			}
+ 			std::vector<std::string> user_devices;
+ 			std::vector<bool> device_aliased;
+-			if (android::vold::fscrypt_mount_metadata_encrypted(Decrypt_Data->Actual_Block_Device, Decrypt_Data->Mount_Point, false, false, Decrypt_Data->Current_File_System, false, user_devices, device_aliased, 0, TWFunc::Path_Exists(additional_fstab) ? additional_fstab : "")) {
++			if (android::vold::fscrypt_mount_metadata_encrypted(Decrypt_Data->Actual_Block_Device, Decrypt_Data->Mount_Point, false, false, Decrypt_Data->Current_File_System, false, user_devices, device_aliased, 0, TWFunc::Path_Exists(additional_fstab) ? additional_fstab : "/system/etc/recovery.fstab")) {
+ 				std::string crypto_blkdev = android::base::GetProperty("ro.crypto.fs_crypto_blkdev", "error");
+ 				Decrypt_Data->Decrypted_Block_Device = crypto_blkdev;
+ 				LOGINFO("Successfully decrypted metadata encrypted data partition with new block device: '%s'\n", crypto_blkdev.c_str());
+@@ -1672,16 +1691,15 @@ void TWPartitionManager::Set_Restore_Files(string Restore_Name) {
+ 				continue;
+ 
+ 			if (get_date) {
+-				char file_path[255];
++				const std::string file_path = Restore_Name + "/" + str;
+ 				struct stat st;
+-
+-				strcpy(file_path, Restore_Name.c_str());
+-				strcat(file_path, "/");
+-				strcat(file_path, str);
+-				stat(file_path, &st);
+-				string backup_date = ctime((const time_t*)(&st.st_mtime));
+-				DataManager::SetValue(TW_RESTORE_FILE_DATE, backup_date);
+-				get_date = false;
++				if (stat(file_path.c_str(), &st) == 0) {
++					const char* backup_date = ctime(&st.st_mtime);
++					if (backup_date) {
++						DataManager::SetValue(TW_RESTORE_FILE_DATE, std::string(backup_date));
++						get_date = false;
++					}
++				}
+ 			}
+ 
+ 			label = str;
+@@ -2904,7 +2922,7 @@ void TWPartitionManager::Get_Partition_List(string ListType,
+       string Current_Storage = DataManager::GetCurrentStoragePath();
+       for (iter = Partitions.begin(); iter != Partitions.end(); iter++)
+ 	{
+-	  if ((*iter)->Is_Storage)
++	  if ((*iter)->Is_Storage && (!(*iter)->Removable || (*iter)->Is_Present))
+ 	    {
+ 	      struct PartitionList part;
+ 	      sprintf(free_space, "%llu", (*iter)->Free / 1024 / 1024);
+@@ -3106,56 +3124,75 @@ TWPartition *TWPartitionManager::Get_Default_Storage_Partition()
+ 	return res;
+ }
+ 
+-bool TWPartitionManager::Enable_MTP(void) {
+-#ifdef TW_HAS_MTP
+-	if (mtppid) {
+-		LOGINFO("MTP already enabled\n");
+-		return true;
+-	}
+-
+-	int mtppipe[2];
++// Preserve Fox's native MTP server, Mount toggle and partition messages.
++// Android init owns all ConfigFS writes for this board.
++namespace {
++bool n6_usb_state(const char* want) {
++    if (!android::base::WaitForProperty("sys.usb.state",want,std::chrono::seconds(4)))
++        return false;
++    std::string udc;
++    if (!android::base::ReadFileToString("/config/usb_gadget/g1/UDC",&udc))
++        return false;
++    udc=android::base::Trim(udc);
++    return strcmp(want,"none")==0 ? udc.empty() :
++        !udc.empty() && udc==android::base::GetProperty("sys.usb.controller","");
++}
++}
+ 
+-	if (pipe(mtppipe) < 0) {
+-		LOGERR("Error creating MTP pipe\n");
+-		return false;
+-	}
++bool TWPartitionManager::Enable_MTP(void) {
++    if (mtppid) return true;
++    if (android::base::GetProperty("sys.usb.configfs","0")!="1" ||
++        !TWFunc::Path_Exists("/dev/usb-ffs/mtp/ep0"))
++        return false;
++    const auto config=android::base::GetProperty("sys.usb.config","");
++    if (config!="adb" && config!="none") return false;
++    if (property_set("sys.usb.config","none") || !n6_usb_state("none")) {
++        property_set("sys.usb.config","adb");
++        return false;
++    }
++    int fds[2];
++    if (pipe2(fds,O_CLOEXEC)) {
++        property_set("sys.usb.config","adb");
++        return false;
++    }
++    twrpMtp mtp(DataManager::GetIntValue("tw_mtp_debug"));
++    mtppid=mtp.forkserver(fds);
++    close(fds[0]);
++    if (!mtppid) {
++        close(fds[1]);
++        property_set("sys.usb.config","adb");
++        return false;
++    }
++    mtp_write_fd=fds[1];
++    if (property_set("sys.usb.config","mtp,adb") || !n6_usb_state("mtp,adb")) {
++        Disable_MTP();
++        return false;
++    }
++    DataManager::SetValue("tw_mtp_enabled",1);
++    Add_All_MTP_Storage();
++    return true;
++}
+ 
+-	char old_value[PROPERTY_VALUE_MAX];
+-	property_get("sys.usb.config", old_value, "");
+-	if (strcmp(old_value, "mtp,adb") != 0) {
+-		char vendor[PROPERTY_VALUE_MAX];
+-		char product[PROPERTY_VALUE_MAX];
+-		property_set("sys.usb.config", "none");
+-		property_get("usb.vendor", vendor, "18D1");
+-		property_get("usb.product.mtpadb", product, "4EE2");
+-		string vendorstr = vendor;
+-		string productstr = product;
+-		TWFunc::write_to_file("/sys/class/android_usb/android0/idVendor", vendorstr);
+-		TWFunc::write_to_file("/sys/class/android_usb/android0/idProduct", productstr);
+-		property_set("sys.usb.config", "mtp,adb");
+-	}
+-	/* To enable MTP debug, use the twrp command line feature:
+-	 * twrp set tw_mtp_debug 1
+-	 */
+-	twrpMtp *mtp = new twrpMtp(DataManager::GetIntValue("tw_mtp_debug"));
+-	mtppid = mtp->forkserver(mtppipe);
+-	if (mtppid) {
+-		close(mtppipe[0]); // Host closes read side
+-		mtp_write_fd = mtppipe[1];
+-		DataManager::SetValue("tw_mtp_enabled", 1);
+-		Add_All_MTP_Storage();
+-		return true;
+-	} else {
+-		close(mtppipe[0]);
+-		close(mtppipe[1]);
+-		gui_err("mtp_fail=Failed to enable MTP");
+-		return false;
+-	}
+-#else
+-	gui_err("no_mtp=MTP support not included");
+-#endif
+-	DataManager::SetValue("tw_mtp_enabled", 0);
+-	return false;
++bool TWPartitionManager::Disable_MTP(void) {
++    const auto config=android::base::GetProperty("sys.usb.config","");
++    if (!mtppid && config!="mtp,adb") {
++        DataManager::SetValue("tw_mtp_enabled",0);
++        return true;
++    }
++    const bool detached=property_set("sys.usb.config","none")==0 && n6_usb_state("none");
++    if (mtppid>0) {
++        const pid_t child=mtppid;
++        kill(child,SIGKILL);
++        int status;
++        while (waitpid(child,&status,0)<0 && errno==EINTR) {}
++        mtppid=0;
++    }
++    if (mtp_write_fd>=0) close(mtp_write_fd);
++    mtp_write_fd=-1;
++    property_set("sys.usb.ffs.mtp.ready","0");
++    const bool adb=property_set("sys.usb.config","adb")==0 && n6_usb_state("adb");
++    DataManager::SetValue("tw_mtp_enabled",0);
++    return detached && adb;
+ }
+ 
+ void TWPartitionManager::Add_All_MTP_Storage(void) {
+@@ -3174,42 +3211,6 @@ void TWPartitionManager::Add_All_MTP_Storage(void) {
+ #endif
+ }
+ 
+-bool TWPartitionManager::Disable_MTP(void) {
+-	char old_value[PROPERTY_VALUE_MAX];
+-	property_set("sys.usb.ffs.mtp.ready", "0");
+-	property_get("sys.usb.config", old_value, "");
+-	if (strcmp(old_value, "adb") != 0) {
+-		char vendor[PROPERTY_VALUE_MAX];
+-		char product[PROPERTY_VALUE_MAX];
+-		property_set("sys.usb.config", "none");
+-		property_get("usb.vendor", vendor, "18D1");
+-		property_get("usb.product.adb", product, "D001");
+-		string vendorstr = vendor;
+-		string productstr = product;
+-		TWFunc::write_to_file("/sys/class/android_usb/android0/idVendor", vendorstr);
+-		TWFunc::write_to_file("/sys/class/android_usb/android0/idProduct", productstr);
+-		usleep(2000);
+-	}
+-#ifdef TW_HAS_MTP
+-	if (mtppid) {
+-		LOGINFO("Disabling MTP\n");
+-		int status;
+-		kill(mtppid, SIGKILL);
+-		mtppid = 0;
+-		// We don't care about the exit value, but this prevents a zombie process
+-		waitpid(mtppid, &status, 0);
+-		close(mtp_write_fd);
+-		mtp_write_fd = -1;
+-	}
+-#endif
+-	property_set("sys.usb.config", "adb");
+-#ifdef TW_HAS_MTP
+-	DataManager::SetValue("tw_mtp_enabled", 0);
+-	return true;
+-#endif
+-	return false;
+-}
+-
+ TWPartition* TWPartitionManager::Find_Partition_By_MTP_Storage_ID(unsigned int Storage_ID) {
+ 	std::vector<TWPartition*>::iterator iter;
+ 
+@@ -3689,6 +3690,10 @@ void TWPartitionManager::Override_Active_Slot(const string& Slot) {
+ }
+ 
+ void TWPartitionManager::Set_Active_Slot(const string& Slot) {
++	if (N6HasPendingOta()) {
++		gui_err("n6_ota_slot_pending=Use Reboot to apply the staged OTA instead of switching slots manually.");
++		return;
++	}
+ 	if (Slot != "A" && Slot != "B") {
+ 		LOGERR("Set_Active_Slot invalid slot '%s'\n", Slot.c_str());
+ 		return;
+@@ -3761,16 +3766,13 @@ void TWPartitionManager::Handle_Uevent(const Uevent_Block_Data& uevent_data) {
+ 
+ 	for (iter = Partitions.begin(); iter != Partitions.end(); iter++) {
+ 		if (!(*iter)->Sysfs_Entry.empty()) {
+-			string device;
+-			size_t wildcard = (*iter)->Sysfs_Entry.find("*");
+-			if (wildcard != string::npos) {
+-				device = (*iter)->Sysfs_Entry.substr(0, wildcard);
+-			} else {
+-				device = (*iter)->Sysfs_Entry;
+-			}
+-			if (device == uevent_data.sysfs_path.substr(0, device.size())) {
++			const auto& device = (*iter)->Sysfs_Entry;
++			if (RecoverySysfsMatch(device, uevent_data.sysfs_path)) {
+ 				// Found a match
+ 				if (uevent_data.action == "add") {
++					if ((*iter)->Is_Present && (*iter)->Primary_Block_Device !=
++					    "/dev/block/" + uevent_data.block_device)
++						return;
+ 					(*iter)->Primary_Block_Device = "/dev/block/" + uevent_data.block_device;
+ 					(*iter)->Alternate_Block_Device = (*iter)->Primary_Block_Device;
+ 					(*iter)->Is_Present = true;
+@@ -3781,6 +3783,8 @@ void TWPartitionManager::Handle_Uevent(const Uevent_Block_Data& uevent_data) {
+ 					}
+ 					return;
+ 				} else if (uevent_data.action == "remove") {
++					if ((*iter)->Primary_Block_Device != "/dev/block/" + uevent_data.block_device)
++						return;
+ 					(*iter)->Is_Present = false;
+ 					(*iter)->Primary_Block_Device = "";
+ 					(*iter)->Actual_Block_Device = "";
+@@ -3896,7 +3900,8 @@ void TWPartitionManager::Coldboot_Scan(std::vector<string> *sysfs_entries, const
+ 		string Real_Path = real_path;
+ 		std::vector<string>::iterator iter;
+ 		for (iter = sysfs_entries->begin(); iter != sysfs_entries->end(); iter++) {
+-			if (Real_Path.find((*iter)) != string::npos) {
++			if (Real_Path.compare(0, 4, "/sys") == 0 &&
++			    RecoverySysfsMatch(*iter, Real_Path.substr(4))) {
+ 				string Write_Path = Real_Path + "/uevent";
+ 				if (TWFunc::Path_Exists(Write_Path)) {
+ 					const char* write_val = "add\n";
+@@ -3930,10 +3935,7 @@ void TWPartitionManager::Coldboot() {
+ 
+ 	for (iter = Partitions.begin(); iter != Partitions.end(); iter++) {
+ 		if (!(*iter)->Sysfs_Entry.empty()) {
+-			size_t wildcard_pos = (*iter)->Sysfs_Entry.find("*");
+-			if (wildcard_pos == string::npos)
+-				wildcard_pos = (*iter)->Sysfs_Entry.size();
+-			sysfs_entries.push_back((*iter)->Sysfs_Entry.substr(0, wildcard_pos));
++			sysfs_entries.push_back((*iter)->Sysfs_Entry);
+ 		}
+ 	}
+ 
+@@ -4725,6 +4727,7 @@ void TWPartitionManager::Setup_Super_Partition() {
+ 	superPartition->Mount_Point = "/super";
+ 	superPartition->Actual_Block_Device = superPart;
+ 	superPartition->Alternate_Block_Device = superPart;
++	superPartition->Primary_Block_Device = superPart;
+ 	superPartition->Backup_Display_Name = "Super (";
+ 	// Add first 4 items to fstab as logical that you would like to display in Backup_Display_Name
+ 	// for the Super partition
+@@ -4748,6 +4751,8 @@ void TWPartitionManager::Setup_Super_Partition() {
+ 	superPartition->Is_Present = true;
+ 	superPartition->Is_SubPartition = false;
+ 	superPartition->Setup_Image();
++	// This synthetic entry is added after Update_System_Details().
++	superPartition->Update_Size(false);
+ 	Add_Partition(superPartition);
+ 	PartitionManager.Output_Partition(superPartition);
+ }
+diff --git a/twrp-functions.cpp b/twrp-functions.cpp
+index ef35ae7..cdf6fb6 100755
+--- a/twrp-functions.cpp
++++ b/twrp-functions.cpp
+@@ -1088,6 +1088,9 @@ void TWFunc::Update_Intent_File(string Intent)
+ // reboot: Reboot the system. Return -1 on error, no return on success
+ int TWFunc::tw_reboot(RebootCommand command)
+ {
++	if (!N6CommitPendingOta())
++		return -1;
++
+ 	DataManager::Flush();
+ 	Update_Log_File();
+ 
+@@ -2759,6 +2762,31 @@ std::string TWFunc::Get_Balanced_Governor(void)
+   return balanced_gov;
+ }
+ 
++unsigned TWFunc::Apply_Balanced_Governor() {
++  const std::string root = "/sys/devices/system/cpu/cpufreq";
++  const std::string governor = Get_Balanced_Governor();
++  unsigned applied = 0;
++  DIR* dir = opendir(root.c_str());
++  if (!dir)
++    return applied;
++  while (const auto* entry = readdir(dir)) {
++    const std::string policy(entry->d_name);
++    if (policy.compare(0, 6, "policy") != 0 || policy.size() == 6 ||
++        policy.find_first_not_of("0123456789", 6) != std::string::npos)
++      continue;
++    const std::string path = root + "/" + policy;
++    if (!CheckWord(path + "/scaling_available_governors", governor))
++      continue;
++    const std::string setting = path + "/scaling_governor";
++    if (!CheckWord(setting, governor))
++      write_to_file(setting, governor);
++    if (CheckWord(setting, governor))
++      ++applied;
++  }
++  closedir(dir);
++  return applied;
++}
++
+ void TWFunc::OrangeFox_Startup(void)
+ {
+   int i;
+diff --git a/twrp-functions.hpp b/twrp-functions.hpp
+index 40ca332..2b4f663 100755
+--- a/twrp-functions.hpp
++++ b/twrp-functions.hpp
+@@ -148,6 +148,7 @@ public:
+ 	static bool Toggle_MTP(bool enable);                                        // Disables MTP if enable is false and re-enables MTP if enable is true and it was enabled the last time it was toggled off
+ 	static std::string to_string(unsigned long value); //convert ul to string
+ 	static void SetPerformanceMode(bool mode); // support recovery.perf.mode
++	static unsigned Apply_Balanced_Governor();
+ 	static std::string Get_Balanced_Governor(void);	// Get the supported "balanced" CPU governor (schedutil, interactive, or ondemand)
+ 	static void Disable_Stock_Recovery_Replace(); // Disable stock ROMs from replacing OrangeFox with stock recovery
+ 	static void Disable_Stock_Recovery_Replace_Func(); // Disable stock ROMs from replacing OrangeFox with stock recovery (/system must be already mounted)	
+diff --git a/twrp.cpp b/twrp.cpp
+index d8221d5..48359b8 100644
+--- a/twrp.cpp
++++ b/twrp.cpp
+@@ -94,6 +94,11 @@ static void Decrypt_Page(bool SkipDecryption, bool datamedia) {
+ 			LOGINFO("Is encrypted, do decrypt page first\n");
+ 			if (DataManager::GetIntValue(TW_IS_FBE))
+ 				DataManager::SetValue("tw_crypto_user_id", "0");
++			// The modal credential page can remain open indefinitely. Apply the
++			// native balanced default now; regular startup still loads preferences
++			// and can apply the user's selected policy after this page returns.
++			const unsigned policies = TWFunc::Apply_Balanced_Governor();
++			LOGINFO("Applied balanced CPU governor to %u policies before decryption prompt\n", policies);
+ 			if (gui_startPage("decrypt", 1, 1) != 0) {
+ 				LOGERR("Failed to start decrypt GUI page.\n");
+ 			} else {
+@@ -436,6 +441,8 @@ int main(int argc, char **argv) {
+ 	setbuf(stderr, NULL);
+ 
+ 	signal(SIGPIPE, SIG_IGN);
++	// A fresh Fox process cannot inherit another process's OTA session.
++	unlink("/tmp/n6_ota_pending");
+ 
+ 	// Handle ADB sideload
+ 	if (argc == 3 && strcmp(argv[1], "--adbd") == 0) {
+diff --git a/twrpApex.cpp b/twrpApex.cpp
+index 557283b..0485c65 100755
+--- a/twrpApex.cpp
++++ b/twrpApex.cpp
+@@ -1,6 +1,7 @@
+ #include "twrpApex.hpp"
+ #include "twrp-functions.hpp"
+ #include "common.h"
++#include <android-base/unique_fd.h>
+ 
+ namespace fs = std::filesystem;
+ 
+@@ -91,101 +92,71 @@ std::string twrpApex::unzipImage(std::string file) {
+ }
+ 
+ bool twrpApex::mountApexOnLoopbackDevices(std::vector<std::string> apexFiles) {
+-	int fd = open(LOOP_CONTROL, O_RDWR | O_CLOEXEC);
+-	if (fd < 0) {
+-		LOGERR("Unable to open %s device. Reason: %s\n", LOOP_CONTROL, strerror(errno));
++	android::base::unique_fd control(open(LOOP_CONTROL, O_RDWR | O_CLOEXEC));
++	if (control.get() < 0) {
++		LOGERR("Unable to open %s: %s\n", LOOP_CONTROL, strerror(errno));
+ 		return false;
+ 	}
+ 
+-	size_t device_no = 0;
+-	for (auto&& apexFile:apexFiles) {
+-		int num = ioctl(fd, LOOP_CTL_GET_FREE);
+-		std::string loop_device = LOOP_BLOCK_DEVICE_DIR;
+-		loop_device = loop_device + "loop" + std::to_string(num);
+-		if (!TWFunc::Path_Exists(loop_device)) {
+-			int ret = mknod(loop_device.c_str(), S_IFBLK | S_IRUSR | S_IWUSR , makedev(7, device_no));
+-			if (ret != 0) {
+-				LOGERR("Unable to create loop device: %s\n", loop_device.c_str());
+-				return false;
+-			}
+-		}
+-		std::string fileToMount = unzipImage(apexFile);
+-		if (fileToMount.empty()) {
+-			LOGINFO("Skipping non-existent apex file: %s\n", apexFile.c_str());
++	size_t loaded = 0;
++	for (const auto& apexFile : apexFiles) {
++		if (access(apexFile.c_str(), R_OK) != 0)
+ 			continue;
++		std::string image = unzipImage(apexFile);
++		if (image.empty())
++			return false;
++		int num = ioctl(control.get(), LOOP_CTL_GET_FREE);
++		if (num < 0) {
++			LOGERR("Cannot allocate APEX loop: %s\n", strerror(errno));
++			return false;
+ 		}
+-		bool load_result = loadApexImage(fileToMount, device_no);
+-		if (!load_result) {
++		std::string device = std::string(LOOP_BLOCK_DEVICE_DIR) + "loop" + std::to_string(num);
++		if (!TWFunc::Path_Exists(device) &&
++		    mknod(device.c_str(), S_IFBLK | 0600, makedev(7, num)) != 0 && errno != EEXIST) {
++			LOGERR("Cannot create %s: %s\n", device.c_str(), strerror(errno));
+ 			return false;
+ 		}
+-		device_no++;
++		if (!loadApexImage(image, num))
++			return false;
++		loaded++;
+ 	}
+-	return true;
++	return loaded > 0;
+ }
+ 
+ bool twrpApex::loadApexImage(std::string fileToMount, size_t loop_device_number) {
+-	struct loop_info64 info;
+-
+-	int fd = open(fileToMount.c_str(), O_RDONLY | O_CLOEXEC);
+-	if (fd < 0) {
+-		LOGERR("unable to open apex file: %s. Reason: %s\n", fileToMount.c_str(), strerror(errno));
++	android::base::unique_fd image(open(fileToMount.c_str(), O_RDONLY | O_CLOEXEC));
++	std::string device = std::string(LOOP_BLOCK_DEVICE_DIR) + "loop" + std::to_string(loop_device_number);
++	android::base::unique_fd loop(open(device.c_str(), O_RDWR | O_CLOEXEC));
++	if (image.get() < 0 || loop.get() < 0) {
++		LOGERR("Cannot open APEX image or %s: %s\n", device.c_str(), strerror(errno));
+ 		return false;
+ 	}
+ 
+-	std::string loop_device = "/dev/block/loop" + std::to_string(loop_device_number);
+-	int loop_fd = open(loop_device.c_str(), O_RDONLY);
+-	if (loop_fd < 0) {
+-		LOGERR("unable to open loop device: %s\n", loop_device.c_str());
+-		close(fd);
++	// Atomic attach; lo_sizelimit=0 means the entire backing file. The old
++	// code called lseek after close, turning -1 into a huge unsigned limit.
++	struct loop_config config = {};
++	config.fd = image.get();
++	config.block_size = 4096;
++	config.info.lo_flags = LO_FLAGS_READ_ONLY | LO_FLAGS_AUTOCLEAR;
++	if (ioctl(loop.get(), LOOP_CONFIGURE, &config) < 0) {
++		LOGERR("Cannot configure %s for %s: %s\n", device.c_str(), fileToMount.c_str(), strerror(errno));
+ 		return false;
+ 	}
+ 
+-	if (ioctl(loop_fd, LOOP_SET_FD, fd) < 0) {
+-		LOGERR("failed to mount %s to loop device %s. Reason: %s\n", fileToMount.c_str(), loop_device.c_str(), 
+-			strerror(errno));
+-		close(fd);
+-		close(loop_fd);
+-		return false;
+-	}
+-
+-	close(fd);
+-
+-	memset(&info, 0, sizeof(struct loop_info64));
+-	strlcpy((char*)info.lo_crypt_name, "twrpApex", LO_NAME_SIZE);
+-	off_t apex_size = lseek(fd, 0, SEEK_END);
+-	info.lo_sizelimit = apex_size;
+-	if (ioctl(loop_fd, LOOP_SET_STATUS64, &info)) {
+-		LOGERR("failed to mount loop: %s: %s\n", fileToMount.c_str(), strerror(errno));
+-		close(loop_fd);
++	std::string name = fileToMount.substr(fileToMount.find_last_of('/') + 1);
++	if (name.size() > 5 && name.compare(name.size() - 5, 5, ".apex") == 0)
++		name.resize(name.size() - 5);
++	std::string mountpoint = std::string(APEX_BASE) + name;
++	if (mkdir(mountpoint.c_str(), 0755) != 0 && errno != EEXIST) {
++		LOGERR("Cannot create %s: %s\n", mountpoint.c_str(), strerror(errno));
+ 		return false;
+ 	}
+-	if (ioctl(loop_fd, BLKFLSBUF, 0) == -1) {
+-		LOGERR("Unable to flush loop device buffers\n");
++	if (mount(device.c_str(), mountpoint.c_str(), "ext4", MS_RDONLY | MS_NOSUID | MS_NODEV, "noload") != 0 &&
++	    mount(device.c_str(), mountpoint.c_str(), "erofs", MS_RDONLY | MS_NOSUID | MS_NODEV, nullptr) != 0) {
++		LOGERR("Cannot mount %s on %s: %s\n", device.c_str(), mountpoint.c_str(), strerror(errno));
+ 		return false;
+ 	}
+-	if (ioctl(loop_fd, LOOP_SET_BLOCK_SIZE, 4096) == -1) {
+-		LOGINFO("Failed to set DIRECT_IO buffer size\n");
+-	}
+-	close(loop_fd);
+-
+-	std::string bind_mount(APEX_BASE);
+-	std::string apex_cleaned_mount = fileToMount;
+-	apex_cleaned_mount = std::regex_replace(apex_cleaned_mount, std::regex("\\.apex"), "");
+-
+-	bind_mount = bind_mount + basename(apex_cleaned_mount.c_str());
+-
+-	int ret = mkdir(bind_mount.c_str(), 0666);
+-	if (ret != 0) {
+-		LOGERR("Unable to create bind mount directory: %s\n", bind_mount.c_str());
+-		return false;
+-	}
+-
+-	ret = mount(loop_device.c_str(), bind_mount.c_str(), "ext4", MS_RDONLY, nullptr);
+-	if (ret != 0) {
+-		LOGERR("unable to mount loop device %s to %s. Reason: %s\n", loop_device.c_str(), bind_mount.c_str(), strerror(errno));
+-		return false;
+-	}
+-
++	LOGINFO("APEX RAM image mounted read-only: %s on %s\n", device.c_str(), mountpoint.c_str());
+ 	return true;
+ }
+ 
+diff --git a/twrpinstall/adb_install.cpp b/twrpinstall/adb_install.cpp
+index d9a517f..e7dcbd9 100755
+--- a/twrpinstall/adb_install.cpp
++++ b/twrpinstall/adb_install.cpp
+@@ -65,8 +65,8 @@ pid_t GetMiniAdbdPid() {
+ }
+ 
+ static bool SetUsbConfig(const std::string& state) {
+-  android::base::SetProperty("sys.usb.config", state);
+-  return android::base::WaitForProperty("sys.usb.state", state);
++  return android::base::SetProperty("sys.usb.config", state) &&
++         android::base::WaitForProperty("sys.usb.state", state, std::chrono::seconds(6));
+ }
+ 
+ // Parses the minadbd command in |message|; returns MinadbdCommand::kError upon errors.
+@@ -282,8 +282,6 @@ static void ListenAndExecuteMinadbdCommands(
+ static void CreateMinadbdServiceAndExecuteCommands(
+     const std::map<MinadbdCommand, CommandFunction>& command_map,
+     bool rescue_mode __unused, std::string install_file __unused) {
+-  signal(SIGPIPE, SIG_IGN);
+-
+   android::base::unique_fd recovery_socket;
+   android::base::unique_fd minadbd_socket;
+   if (!android::base::Socketpair(AF_UNIX, SOCK_STREAM, 0, &recovery_socket, &minadbd_socket)) {
+@@ -336,13 +334,15 @@ static void CreateMinadbdServiceAndExecuteCommands(
+     }
+   }
+ 
+-  signal(SIGPIPE, SIG_DFL);
+ }
+ 
+   int twrp_sideload(const char* install_file, Device::BuiltinAction* reboot_action) {
+ 
+   // Save the usb state to restore after the sideload operation.
+-  std::string usb_state = android::base::GetProperty("sys.usb.state", "none");
++  // Both callers have suspended the MTP server. Restore its ADB leg
++  // here; the caller can only restart MTP after this function returns.
++  std::string usb_state = android::base::GetProperty("sys.usb.config", "none");
++  if (usb_state == "mtp,adb") usb_state = "adb";
+   // Clean up state and stop adbd.
+   if (usb_state != "none" && !SetUsbConfig("none")) {
+     LOG(ERROR) << "Failed to clear USB config";
+diff --git a/twrpinstall/include/twinstall.h b/twrpinstall/include/twinstall.h
+index 903ab3f..033c903 100644
+--- a/twrpinstall/include/twinstall.h
++++ b/twrpinstall/include/twinstall.h
+@@ -1,6 +1,9 @@
+ #ifndef RECOVERY_TWINSTALL_H_
+ #define RECOVERY_TWINSTALL_H_
+ 
++bool N6HasPendingOta();
++bool N6CommitPendingOta();
++
+ int TWinstall_zip(const char* path, int* wipe_cache, bool check_for_digest = false);
+ int TWinstall_Run_OTA_BAK (bool reportback); // run the MIUI OTA backup; set some values of reportback is true
+ 
+diff --git a/twrpinstall/twinstall.cpp b/twrpinstall/twinstall.cpp
+index 3691a2f..33ce101 100755
+--- a/twrpinstall/twinstall.cpp
++++ b/twrpinstall/twinstall.cpp
+@@ -29,12 +29,15 @@
+ #include <fcntl.h>
+ #include <limits.h>
+ #include <sys/mman.h>
++#include <sys/socket.h>
+ #include <sys/stat.h>
+ #include <sys/wait.h>
+ #include <sys/mount.h>
+ #include <unistd.h>
+ #include <iostream>
+ #include <fstream>
++#include <mutex>
++#include <utility>
+ 
+ #include <string.h>
+ #include <stdio.h>
+@@ -170,12 +173,74 @@ static int Prepare_Update_Binary(const char *path, ZipArchiveHandle Zip) {
+ }
+ 
+ 
++// This session lasts only until Fox exits; a crash closes the decision channel
++// without authorizing activation. The same updater keeps its install plan.
++namespace {
++constexpr char kN6OtaPending[] = "/tmp/n6_ota_pending";
++std::mutex n6_ota_mutex;
++pid_t n6_ota_pid = -1;
++android::base::unique_fd n6_ota_activation;
++FILE* n6_ota_status = nullptr;
++
++bool TakeN6OtaSession(pid_t pid, android::base::unique_fd& activation, FILE* status) {
++	std::lock_guard<std::mutex> lock(n6_ota_mutex);
++	if (n6_ota_pid > 0)
++		return false;
++	// ADB's regular reboot service uses this marker to route to Fox.
++	android::base::unique_fd marker(open(kN6OtaPending,
++	                                      O_CREAT | O_WRONLY | O_CLOEXEC | O_NOFOLLOW,
++	                                      0644));
++	if (!marker.ok())
++		return false;
++	n6_ota_pid = pid;
++	n6_ota_activation = std::move(activation);
++	n6_ota_status = status;
++	return true;
++}
++}
++
++bool N6HasPendingOta() {
++	std::lock_guard<std::mutex> lock(n6_ota_mutex);
++	return n6_ota_pid > 0;
++}
++
++bool N6CommitPendingOta() {
++	std::lock_guard<std::mutex> lock(n6_ota_mutex);
++	if (n6_ota_pid <= 0) {
++		unlink(kN6OtaPending); // a restarted Fox cannot inherit a verified session
++		return true;
++	}
++	gui_msg("n6_ota_committing=Applying the pending OTA before reboot...");
++	const char command = 'C';
++	const bool sent = TEMP_FAILURE_RETRY(
++	    send(n6_ota_activation.get(), &command, 1, MSG_NOSIGNAL)) == 1;
++	n6_ota_activation.reset();
++	char line[1024];
++	while (fgets(line, sizeof(line), n6_ota_status)) {
++		if (strncmp(line, "ui_print ", 9) == 0)
++			gui_print("%s", line + 9);
++	}
++	fclose(n6_ota_status);
++	n6_ota_status = nullptr;
++	int status = -1;
++	const auto pid = TEMP_FAILURE_RETRY(waitpid(n6_ota_pid, &status, 0));
++	const bool ok = sent && pid == n6_ota_pid && WIFEXITED(status) &&
++	                WEXITSTATUS(status) == 0;
++	n6_ota_pid = -1;
++	unlink(kN6OtaPending);
++	if (!ok)
++		gui_err("n6_ota_commit_failed=OTA activation failed; reboot cancelled.");
++	return ok;
++}
++
++
+ static int Run_Update_Binary(const char *path, int* wipe_cache, zip_type ztype) {
+-	int ret_val, pipe_fd[2], status, zip_verify;
++	int ret_val, pipe_fd[2], status = -1, zip_verify;
+ 	int aroma_running = 0;
+ 	char buffer[1024];
+ 	FILE* child_data;
+-	pipe(pipe_fd);
++	if (pipe2(pipe_fd, O_CLOEXEC) != 0)
++		return INSTALL_ERROR;
+ 
+ 	std::vector<std::string> args;
+     if (ztype == UPDATE_BINARY_ZIP_TYPE) {
+@@ -192,6 +257,20 @@ static int Run_Update_Binary(const char *path, int* wipe_cache, zip_type ztype)
+         return ret_val;
+     }
+ 
++	const bool deferred = ztype == AB_OTA_ZIP_TYPE;
++	android::base::unique_fd activation_parent, activation_child;
++	if (deferred) {
++		int fds[2];
++		if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds) != 0) {
++			close(pipe_fd[0]);
++			close(pipe_fd[1]);
++			return INSTALL_ERROR;
++		}
++		activation_parent.reset(fds[0]);
++		activation_child.reset(fds[1]);
++		args.push_back("--n6_activation_fd=" + std::to_string(fds[1]));
++	}
++
+ 	// Convert the vector to a NULL-terminated char* array suitable for execv.
+ 	const char* chr_args[args.size() + 1];
+ 	chr_args[args.size()] = NULL;
+@@ -201,20 +280,46 @@ static int Run_Update_Binary(const char *path, int* wipe_cache, zip_type ztype)
+ 	pid_t pid = fork();
+ 	if (pid == 0) {
+ 		close(pipe_fd[0]);
++		if (fcntl(pipe_fd[1], F_SETFD, 0) == -1)
++			_exit(126);
++		if (deferred) {
++			close(activation_parent.get());
++			if (fcntl(activation_child.get(), F_SETFD, 0) == -1)
++				_exit(126);
++		}
+ 		execve(chr_args[0], const_cast<char**>(chr_args), environ);
+ 		printf("E:Can't execute '%s': %s\n", chr_args[0], strerror(errno));
+ 		_exit(-1);
+ 	}
+ 	close(pipe_fd[1]);
++	activation_child.reset();
++	if (pid < 0) {
++		close(pipe_fd[0]);
++		return INSTALL_ERROR;
++	}
+ 
+ 	*wipe_cache = 0;
+ 
+ 	DataManager::GetValue(TW_SIGNED_ZIP_VERIFY_VAR, zip_verify);
+ 	child_data = fdopen(pipe_fd[0], "r");
++	if (!child_data) {
++		close(pipe_fd[0]);
++		activation_parent.reset();
++		kill(pid, SIGTERM);
++		TEMP_FAILURE_RETRY(waitpid(pid, &status, 0));
++		return INSTALL_ERROR;
++	}
+ 	while (fgets(buffer, sizeof(buffer), child_data) != NULL) {
+ 		char* command = strtok(buffer, " \n");
+ 		if (command == NULL) {
+ 			continue;
++		} else if (deferred && strcmp(command, "n6_ota_ready") == 0) {
++			if (TakeN6OtaSession(pid, activation_parent, child_data)) {
++				gui_msg("n6_ota_pending=OTA staged. It will be applied on the next normal reboot.");
++				return INSTALL_SUCCESS;
++			}
++			activation_parent.reset();
++			break;
+ 		} else if (strcmp(command, "progress") == 0) {
+ 			char* fraction_char = strtok(NULL, " \n");
+ 			char* seconds_char = strtok(NULL, " \n");
+@@ -259,6 +364,7 @@ static int Run_Update_Binary(const char *path, int* wipe_cache, zip_type ztype)
+ 		}
+ 	}
+ 	fclose(child_data);
++	activation_parent.reset();
+ 
+ 	int waitrc = TWFunc::Wait_For_Child(pid, &status, "Updater");
+ 
+@@ -279,11 +385,16 @@ static int Run_Update_Binary(const char *path, int* wipe_cache, zip_type ztype)
+       		return INSTALL_ERROR;
+     	}
+ 
+-	return INSTALL_SUCCESS;
++	// A deferred engine must hand off the verified session before exit.
++	return deferred ? INSTALL_ERROR : INSTALL_SUCCESS;
+ }
+ 
+ int TWinstall_zip(const char *path, int *wipe_cache, bool check_for_digest)
+ {
++	if (N6HasPendingOta()) {
++		gui_err("n6_ota_reboot_first=Reboot to apply the staged OTA before installing another ZIP.");
++		return INSTALL_ERROR;
++	}
+   int ret_val, zip_verify = 1, unmount_system = 1, reflashtwrp = 0, unmount_vendor = 1;
+   bool run_rom_scripts = false;
+ 
+@@ -461,12 +572,13 @@ int TWinstall_zip(const char *path, int *wipe_cache, bool check_for_digest)
+ 				PartitionManager.UnMount_By_Path("/vendor", false);
+ 			if (!system_mount_state)
+ 				PartitionManager.UnMount_By_Path(PartitionManager.Get_Android_Root_Path(), false);
+-			if (android::base::GetBoolProperty("ro.virtual_ab.enabled", false)) {
++			if (!N6HasPendingOta() && android::base::GetBoolProperty("ro.virtual_ab.enabled", false)) {
+ 				PartitionManager.Unlock_Block_Partitions();
+ 				PartitionManager.Prepare_All_Super_Volumes();
+ 				gui_warn("mount_vab_partitions=Devices on super may not mount until after rebooting recovery.");
+ 			}
+-			gui_warn("flash_ab_reboot=To flash additional zips, please reboot recovery to switch to the updated slot.");
++			if (!N6HasPendingOta())
++				gui_warn("flash_ab_reboot=To flash additional zips, please reboot recovery to switch to the updated slot.");
+ 		} else {
+ 			std::string binary_name("ui.xml");
+ 			ZipEntry64 binary_entry;

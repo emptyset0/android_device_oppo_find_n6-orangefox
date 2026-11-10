@@ -1,0 +1,332 @@
+diff --git a/Decrypt.cpp b/Decrypt.cpp
+index a02bad8..c021336 100755
+--- a/Decrypt.cpp
++++ b/Decrypt.cpp
+@@ -33,6 +33,7 @@
+ #include <openssl/sha.h>
+ #include <openssl/aes.h>
+ #include <openssl/evp.h>
++#include "ce_inner_gcm.h"
+ #include <openssl/rand.h>
+ 
+ #include <dirent.h>
+@@ -83,6 +84,8 @@ extern "C" {
+ #include "fscrypt_policy.h"
+ #include "HashPassword.h"
+ #include "KeystoreInfo.hpp"
++
++void CopySqliteDbForRecovery();
+ #include "KeyStorage.h"
+ #include "Weaver1.h"
+ #include "android/os/IVold.h"
+@@ -424,20 +427,14 @@ bool Get_Weaver_Data(const std::string& spblob_path, const std::string& handle_s
+ 			}
+ 		}
+ 	}
+-	if (found_file == false) {
+-		printf("Get_Weaver_Data: No weaver file found for %s\n", handle_str.c_str());
+-		return found_file;
+-	} else {
+-		// output_hex(weaver_data.data(), weaver_data.size());printf("\n");
+-		const unsigned char* byteptr = (const unsigned char*)weaver_data.data();
+-		wd->version = *byteptr;
+-		// printf("weaver version %i\n", wd->version);
+-		const int* intptr = (const int*)weaver_data.data() + sizeof(unsigned char);
+-		wd->slot = *intptr;
+-		//endianswap(&wd->slot); not needed
+-		// printf("weaver slot %i\n", wd->slot);
+-	}
+-	return found_file;
++	if (!found_file || weaver_data.size() != 5 ||
++	    static_cast<uint8_t>(weaver_data[0]) != 1)
++		return false;
++	const auto* bytes = reinterpret_cast<const uint8_t*>(weaver_data.data());
++	wd->version = bytes[0];
++	wd->slot = (uint32_t(bytes[1]) << 24) | (uint32_t(bytes[2]) << 16) |
++	           (uint32_t(bytes[3]) << 8) | uint32_t(bytes[4]);
++	return true;
+ }
+ 
+ namespace android {
+@@ -491,17 +488,7 @@ namespace keystore {
+ 		}
+ 	}
+ 
+-	void copySqliteDb() {
+-		std::string keystore_path = "/tmp/misc/keystore/";
+-		std::string dst = keystore_path + "persistent.sqlite";
+-		std::string src = "/data/misc/keystore/persistent.sqlite";
+-		std::ifstream srcif(src.c_str(), std::ios::binary);
+-		std::ofstream dstof(dst.c_str(), std::ios::binary);
+-		printf("copying '%s' to '%s'\n", src.c_str(), dst.c_str());
+-		dstof << srcif.rdbuf();
+-		srcif.close();
+-		dstof.close();
+-	}
++	void copySqliteDb() { CopySqliteDbForRecovery(); }
+ 
+ 	/* C++ replacement for function of the same name
+ 	* https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r23/services/core/java/com/android/server/locksettings/SyntheticPasswordManager.java#867
+@@ -517,6 +504,8 @@ namespace keystore {
+ 		std::string spblob_data;
+ 		if (!Get_Spblob_Data(spblob_path, handle_str, ".spblob", "spblob", &spblob_data))
+ 			return disk_decryption_secret_key;
++		if (spblob_data.size() <= 2 + 12 + 16 || spblob_data.size() > 65536)
++			return disk_decryption_secret_key;
+ 		unsigned char* byteptr = (unsigned char*)spblob_data.data();
+ 		if (*byteptr != SYNTHETIC_PASSWORD_VERSION_V2 && *byteptr != SYNTHETIC_PASSWORD_VERSION_V1
+ 				&& *byteptr != SYNTHETIC_PASSWORD_VERSION_V3) {
+@@ -571,6 +560,7 @@ namespace keystore {
+ 			ks2::KeyEntryResponse keyEntryResponse;
+ 			::ndk::SpAIBinder keystoreBinder(AServiceManager_checkService("android.system.keystore2.IKeystoreService/default"));
+ 			auto keystore = ks2::IKeystoreService::fromBinder(keystoreBinder);
++			if (!keystore) return disk_decryption_secret_key;
+ 			auto rc = keystore->getKeyEntry(keyDescriptor(keystore_alias), &keyEntryResponse);
+ 			if (!rc.isOk()) {
+ 				auto error = unwrapError(rc);
+@@ -583,6 +573,7 @@ namespace keystore {
+ 			}
+ 			std::variant<int, ks2::KeyEntryResponse> response = keyEntryResponse;
+ 			auto keyResponse = std::get<ks2::KeyEntryResponse>(response);
++			if (!keyResponse.iSecurityLevel) return disk_decryption_secret_key;
+ 			ks2::CreateOperationResponse encOperationResponse;
+ 			auto begin_rc = keyResponse.iSecurityLevel->createOperation(
+ 				keyResponse.metadata.key, begin_params.vector_data(), true,
+@@ -591,6 +582,7 @@ namespace keystore {
+ 				printf("Begin Operation failed\n");
+ 				return disk_decryption_secret_key;
+ 			}
++			if (!encOperationResponse.iOperation) return disk_decryption_secret_key;
+ 			std::optional<std::vector<uint8_t>> optPlaintext;
+ 
+ 			begin_rc = encOperationResponse.iOperation->finish(cipher_text_hidlvec, {}, &optPlaintext);
+@@ -599,56 +591,31 @@ namespace keystore {
+ 				return disk_decryption_secret_key;
+ 			}
+ 
+-			size_t keystore_result_size = optPlaintext->size();
+-			unsigned char* keystore_result = (unsigned char*)malloc(keystore_result_size);
+-			if (!keystore_result) {
+-				printf("malloc on keystore_result\n");
+-				return disk_decryption_secret_key;
+-			}
+-			memcpy(keystore_result, &optPlaintext->front(), keystore_result_size);
+-
+-			const unsigned char* intermediate_iv = keystore_result;
+-			// printf("intermediate_iv: "); output_hex((const unsigned char*)intermediate_iv, 12); printf("\n");
+-			const unsigned char* intermediate_cipher_text = (const unsigned char*)keystore_result + 12; // The cipher text comes immediately after the IV
+-			int cipher_size = keystore_result_size - 12;
+-			// First we personalize as seen https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r23/services/core/java/com/android/server/locksettings/SyntheticPasswordCrypto.java#102
+-			void* personalized_application_id = PersonalizedHashBinary(PERSONALISATION_APPLICATION_ID, (const char*)application_id, application_id_size);
++			if (!optPlaintext) return disk_decryption_secret_key;
++			void* personalized_application_id = PersonalizedHashBinary(
++				PERSONALISATION_APPLICATION_ID, static_cast<const char*>(application_id), application_id_size);
+ 			if (!personalized_application_id) {
+-				printf("Unable to obtain personalized_application_id\n");
++				OPENSSL_cleanse(optPlaintext->data(), optPlaintext->size());
+ 				return disk_decryption_secret_key;
+ 			}
+-			// printf("personalized application id: "); output_hex((unsigned char*)personalized_application_id, SHA512_DIGEST_LENGTH); printf("\n");
+-			// Now we'll decrypt using openssl AES/GCM/NoPadding
+-			OpenSSL_add_all_ciphers();
+-			int actual_size=0, final_size=0;
+-			EVP_CIPHER_CTX *d_ctx = EVP_CIPHER_CTX_new();
+-			const unsigned char* key = (const unsigned char*)personalized_application_id; // The key is the now personalized copy of the application ID
+-			// printf("key: "); output_hex((const unsigned char*)key, 32); printf("\n");
+-			EVP_DecryptInit(d_ctx, EVP_aes_256_gcm(), key, intermediate_iv);
+-			unsigned char* secret_key = (unsigned char*)malloc(cipher_size);
+-			if (!secret_key) {
+-				printf("malloc failure on secret key\n");
++			std::vector<uint8_t> sp_secret;
++			const bool authenticated = OpenCeInnerGcm(
++				static_cast<const uint8_t*>(personalized_application_id), *optPlaintext, &sp_secret);
++			OPENSSL_cleanse(personalized_application_id, SHA512_DIGEST_LENGTH);
++			free(personalized_application_id);
++			OPENSSL_cleanse(optPlaintext->data(), optPlaintext->size());
++			if (!authenticated) {
++				printf("Synthetic password GCM authentication failed\n");
+ 				return disk_decryption_secret_key;
+ 			}
+-			EVP_DecryptUpdate(d_ctx, secret_key, &actual_size, intermediate_cipher_text, cipher_size);
+-			unsigned char tag[AES_BLOCK_SIZE];
+-			EVP_CIPHER_CTX_ctrl(d_ctx, EVP_CTRL_GCM_SET_TAG, 16, tag);
+-			EVP_DecryptFinal_ex(d_ctx, secret_key + actual_size, &final_size);
+-			EVP_CIPHER_CTX_free(d_ctx);
+-			free(personalized_application_id);
+-			free(keystore_result);
+-			int secret_key_real_size = actual_size - 16;
+-			// printf("secret key:  "); output_hex((const unsigned char*)secret_key, secret_key_real_size); printf("\n");
+-			// The payload data from the keystore update is further personalized at https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r23/services/core/java/com/android/server/locksettings/SyntheticPasswordManager.java#153
+-			// We now have the disk decryption key!
++			const auto* bytes = reinterpret_cast<const char*>(sp_secret.data());
+ 			if (*synthetic_password_version == SYNTHETIC_PASSWORD_VERSION_V3) {
+-				// V3 uses SP800 instead of SHA512
+-				disk_decryption_secret_key = PersonalizedHashSP800(PERSONALIZATION_FBE_KEY, PERSONALISATION_CONTEXT, (const char*)secret_key, secret_key_real_size);
++				disk_decryption_secret_key = PersonalizedHashSP800(PERSONALIZATION_FBE_KEY,
++					PERSONALISATION_CONTEXT, bytes, sp_secret.size());
+ 			} else {
+-				disk_decryption_secret_key = PersonalizedHash(PERSONALIZATION_FBE_KEY, (const char*)secret_key, secret_key_real_size);
++				disk_decryption_secret_key = PersonalizedHash(PERSONALIZATION_FBE_KEY, bytes, sp_secret.size());
+ 			}
+-			// printf("disk_decryption_secret_key: '%s'\n", disk_decryption_secret_key.c_str());
+-			free(secret_key);
++			OPENSSL_cleanse(sp_secret.data(), sp_secret.size());
+ 			return disk_decryption_secret_key;
+ 		}
+ 		return disk_decryption_secret_key;
+@@ -775,6 +742,9 @@ bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password
+ 		}
+ 		// Now we start driving weaverVerify: https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r23/services/core/java/com/android/server/locksettings/SyntheticPasswordManager.java#343
+ 		// Called from https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r23/services/core/java/com/android/server/locksettings/SyntheticPasswordManager.java#776
++		// The PLP110 provider is AIDL. A failed HAL must not freeze the unlock page.
++		::ndk::SpAIBinder provider(AServiceManager_checkService("android.hardware.weaver.IWeaver/default"));
++		if (!provider.get()) return Free_Return(retval, weaver_key, &pwd);
+ 		android::vold::Weaver weaver;
+ 		if (!weaver) {
+ 			printf("Failed to get weaver service\n");
+diff --git a/KeyStorage.cpp b/KeyStorage.cpp
+index a186c04..63f6ee3 100644
+--- a/KeyStorage.cpp
++++ b/KeyStorage.cpp
+@@ -196,13 +196,13 @@ bool createSecdiscardable(const std::string& filename, std::string* hash) {
+ }
+ 
+ bool readSecdiscardable(const std::string& filename, std::string* hash) {
+-    if (pathExists(filename)) {
+-        std::string secdiscardable;
+-        if (!readFileToString(filename, &secdiscardable)) return false;
+-        hashWithPrefix(kHashPrefix_secdiscardable, secdiscardable, hash);
+-    } else {
+-        *hash = "";
++    if (!pathExists(filename)) {
++        hash->clear();
++        return true;
+     }
++    std::string secdiscardable;
++    if (!readFileToString(filename, &secdiscardable)) return false;
++    hashWithPrefix(kHashPrefix_secdiscardable, secdiscardable, hash);
+     return true;
+ }
+ 
+@@ -335,50 +335,26 @@ static KeystoreOperation BeginKeystoreOp(Keystore& keystore, const std::string&
+ 
+     auto blob_file = dir + "/" + kFn_keymaster_key_blob;
+     LOG(INFO) << "reading blob_file: " << blob_file;
+-    std::string blob_dir(kFn_keymaster_key_blob);
+-    std::string temp_dir = "/tmp/" + blob_dir + "/";
+-    if (TEMP_FAILURE_RETRY(mkdir(temp_dir.c_str(), 0700)) == -1) {
+-        PLOG(ERROR) << "key mkdir " << temp_dir;
+-    }
+-    auto upgraded_blob_file = temp_dir + kFn_keymaster_key_blob;
+-    // auto upgraded_blob_file = dir + "/" + kFn_keymaster_key_blob_upgraded;
+     std::lock_guard<std::mutex> lock(key_upgrade_lock);
+-
+     std::string blob;
+-//     bool already_upgraded = IsKeyCommitPending(dir);
+-//     if (already_upgraded) {
+-//         LOG(INFO)
+-//                 << blob_file
+-//                 << " was already upgraded and is waiting to be committed; using the upgraded blob";
+-//         if (!readFileToString(upgraded_blob_file, &blob)) return KeystoreOperation();
+-//     } else {
+-//         DeleteUpgradedKey(keystore, upgraded_blob_file);
+-        if (!readFileToString(blob_file, &blob)) return KeystoreOperation();
+-//     }
++    if (!readFileToString(blob_file, &blob)) return KeystoreOperation();
+ 
+     auto opHandle = keystore.begin(blob, inParams, outParams);
+     if (!opHandle) return opHandle;
+ 
+-    // If key blob wasn't upgraded, nothing left to do.
+-    // if (!opHandle.getUpgradedBlob()) return opHandle;
++    // A valid operation does not imply the hardware upgraded the blob.
++    const auto upgraded_blob = opHandle.getUpgradedBlob();
++    if (!upgraded_blob) return opHandle;
+ 
+-//     if (already_upgraded) {
+-//         LOG(ERROR) << "Unexpected case; already-upgraded key " << upgraded_blob_file
+-//                    << " still requires upgrade";
+-//         return KeystoreOperation();
+-//     }
+-    LOG(INFO) << "Upgrading key: " << blob_file;
+-    
+-    if (!writeStringToFile(*opHandle.getUpgradedBlob(), upgraded_blob_file))
++    // Recovery must not replace the original blob or delete its old key.
++    const std::string temp_dir = "/tmp/" + std::string(kFn_keymaster_key_blob) + "/";
++    if (TEMP_FAILURE_RETRY(mkdir(temp_dir.c_str(), 0700)) == -1 && errno != EEXIST) {
++        PLOG(ERROR) << "key mkdir " << temp_dir;
+         return KeystoreOperation();
+-//     if (cp_needsCheckpoint()) {
+-//         LOG(INFO) << "Wrote upgraded key to " << upgraded_blob_file
+-//                   << "; delaying commit due to checkpoint";
+-//         ScheduleKeyCommit(dir);
+-//     } else {
+-//         if (!CommitUpgradedKey(keystore, dir)) return KeystoreOperation();
+-//         LOG(INFO) << "Key upgraded: " << blob_file;
+-//     }
++    }
++    const auto upgraded_blob_file = temp_dir + kFn_keymaster_key_blob;
++    LOG(INFO) << "Using temporary upgraded key blob for " << blob_file;
++    if (!writeStringToFile(*upgraded_blob, upgraded_blob_file)) return KeystoreOperation();
+     return opHandle;
+ }
+ 
+diff --git a/KeystoreInfo.cpp b/KeystoreInfo.cpp
+index a74a713..1db0983 100755
+--- a/KeystoreInfo.cpp
++++ b/KeystoreInfo.cpp
+@@ -79,3 +79,30 @@ std::string KeystoreInfo::getAlias(std::string handle) {
+ 	alias = alias + handle;
+ 	return alias;
+ }
++
++
++void CopySqliteDbForRecovery() {
++	sqlite3 *src = nullptr, *dst = nullptr;
++	int rc = sqlite3_open_v2("/data/misc/keystore/persistent.sqlite",
++	                         &src, SQLITE_OPEN_READONLY, nullptr);
++	if (rc == SQLITE_OK)
++		rc = sqlite3_open_v2("/tmp/misc/keystore/persistent.sqlite", &dst,
++		                     SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
++	if (rc == SQLITE_OK) {
++		sqlite3_backup *backup = sqlite3_backup_init(dst, "main", src, "main");
++		if (backup) {
++			for (int attempt = 0; attempt < 20; ++attempt) {
++				rc = sqlite3_backup_step(backup, -1);
++				if (rc != SQLITE_BUSY && rc != SQLITE_LOCKED) break;
++				usleep(50000);
++			}
++			int finish = sqlite3_backup_finish(backup);
++			if (rc == SQLITE_DONE) rc = finish;
++		} else {
++			rc = sqlite3_errcode(dst);
++		}
++	}
++	if (dst) sqlite3_close(dst);
++	if (src) sqlite3_close(src);
++	if (rc != SQLITE_OK) printf("Unable to copy keystore database: SQLite %d\n", rc);
++}
+diff --git a/MetadataCrypt.cpp b/MetadataCrypt.cpp
+index 3842e8f..dc290a6 100644
+--- a/MetadataCrypt.cpp
++++ b/MetadataCrypt.cpp
+@@ -126,6 +126,7 @@ static bool read_key(const std::string& metadata_key_dir, const KeyGeneration& g
+     std::string sKey;
+     auto dir = metadata_key_dir + "/key";
+     LOG(INFO) << "metadata_key_dir/key: " << dir;
++    if (gen.keysize == 0) return retrieveKey(dir, kEmptyAuthentication, key);
+     if (!MkdirsSync(dir, 0700)) return false;
+     auto in_dsu = android::base::GetBoolProperty("ro.gsid.image_running", false);
+     // !pathExists(dir) does not imply there's a factory reset when in DSU mode.
+@@ -434,7 +435,10 @@ bool fscrypt_mount_metadata_encrypted(const std::string& blk_device, const std::
+     }
+ 
+     LOG(INFO) << "Mounting metadata-encrypted filesystem:" << mount_point;
+-    mount_via_fs_mgr(mount_point.c_str(), crypto_blkdev.c_str(), needs_encrypt);
++    if (!mount_via_fs_mgr(mount_point.c_str(), crypto_blkdev.c_str(), needs_encrypt)) {
++        DeviceMapper::Instance().DeleteDevice(kDmNameUserdata);
++        return false;
++    }
+     android::base::SetProperty("ro.crypto.fs_crypto_blkdev", crypto_blkdev);
+ 
+     // Record that there's at least one fstab entry with metadata encryption

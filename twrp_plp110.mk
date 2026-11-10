@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+DEVICE_PATH := device/oppo/plp110
+$(call inherit-product, $(DEVICE_PATH)/device.mk)
+PRODUCT_DEVICE := plp110
+PRODUCT_NAME := twrp_plp110
+PRODUCT_BRAND := OPPO
+PRODUCT_MODEL := PLP110
+PRODUCT_MANUFACTURER := OPPO
+PRODUCT_RELEASE_NAME := PLP110

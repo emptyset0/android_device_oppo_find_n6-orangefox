@@ -1,0 +1,28 @@
+{
+  "bootable/recovery": {
+    "revision": "0f7831d3240f4c3925a0b5fd7d2c907ddf8704c2",
+    "patch": "patches/bootable-recovery.patch"
+  },
+  "system/vold": {
+    "revision": "953de9608eb78380b3c4e39e801c2bc0af7dbddc",
+    "patch": "patches/system-vold.patch"
+  },
+  "system/update_engine": {
+    "revision": "c78c40f7a85e5ab7928faf1133cb5eadfc2d1673",
+    "patch": "patches/system-update_engine.patch"
+  },
+  "system/core": {
+    "revision": "1e08a1374a2ebebd1ae828e44a53535f12c30258",
+    "patch": "patches/system-core.patch"
+  },
+  "packages/modules/adb": {
+    "revision": "ce023afef190b0cea7f8939e9dd5ee3ee79b137b",
+    "patch": "patches/packages-modules-adb.patch"
+  },
+  "vendor/recovery": {
+    "revision": "428b7583b2a94df82d4031ebcc4729f847b684b5"
+  },
+  "vendor/twrp": {
+    "revision": "3e0b71f4d1f624f7ea462507a1b974d80cc65627"
+  }
+}

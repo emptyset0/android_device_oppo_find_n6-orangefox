@@ -1,0 +1,325 @@
+diff --git a/aosp/dynamic_partition_control_android.cc b/aosp/dynamic_partition_control_android.cc
+index 9cac5fe..2078177 100644
+--- a/aosp/dynamic_partition_control_android.cc
++++ b/aosp/dynamic_partition_control_android.cc
+@@ -567,17 +567,11 @@ bool DynamicPartitionControlAndroid::PreparePartitionsForUpdate(
+         return true;
+       }
+ 
+-      // Virtual A/B device doing Virtual A/B update in Android mode must use
+-      // snapshots.
+-      if (!IsRecovery()) {
+-        LOG(ERROR) << "PrepareSnapshotPartitionsForUpdate failed in Android "
+-                   << "mode";
+-        return false;
+-      }
+-
+-      delete_source = true;
+-      LOG(INFO) << "PrepareSnapshotPartitionsForUpdate failed in recovery. "
+-                << "Attempt to overwrite existing partitions if possible";
++      // Deferred activation must leave the running slot intact. Only the
++      // Recovery sideload variant of this change is shipped on N6.
++      LOG(ERROR) << "Unable to prepare required Virtual A/B snapshots; "
++                 << "will not overwrite source-slot partitions";
++      return false;
+     } else {
+       // Downgrading to an non-Virtual A/B build or is secondary OTA.
+       LOG(INFO) << "Using regular A/B on Virtual A/B because package disabled "
+diff --git a/aosp/sideload_main.cc b/aosp/sideload_main.cc
+index 9b5e8ad..3cc4b2d 100644
+--- a/aosp/sideload_main.cc
++++ b/aosp/sideload_main.cc
+@@ -15,6 +15,16 @@
+ //
+ 
+ #include <xz.h>
++#include <fcntl.h>
++#include <linux/fs.h>
++#include <string.h>
++#include <sys/ioctl.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <array>
++#include <android-base/file.h>
+ 
+ #include <string>
+ #include <vector>
+@@ -46,6 +56,96 @@ using update_engine::UpdateStatus;
+ namespace chromeos_update_engine {
+ namespace {
+ 
++// Included only by update_engine_sideload, never by Android's OTA daemon.
++bool SameAbl(int source, int target, uint64_t size, bool* same) {
++  std::array<char, 65536> src, dst;
++  *same = true;
++  for (uint64_t offset = 0; offset < size;) {
++    const size_t len = std::min<uint64_t>(src.size(), size - offset);
++    if (!android::base::ReadFullyAtOffset(source, src.data(), len, offset) ||
++        !android::base::ReadFullyAtOffset(target, dst.data(), len, offset)) {
++      return false;
++    }
++    if (memcmp(src.data(), dst.data(), len) != 0) {
++      *same = false;
++      return true;
++    }
++    offset += len;
++  }
++  return true;
++}
++
++bool RestoreTargetAbl(BootControlInterface* boot, const InstallPlan& plan) {
++  std::string source_path, target_path;
++  bool source_dynamic = false, target_dynamic = false;
++  if (plan.source_slot != boot->GetCurrentSlot() ||
++      plan.source_slot == plan.target_slot ||
++      plan.source_slot >= boot->GetNumSlots() ||
++      plan.target_slot >= boot->GetNumSlots() ||
++      !boot->GetPartitionDevice("abl", plan.source_slot, false, &source_path,
++                                &source_dynamic) ||
++      !boot->GetPartitionDevice("abl", plan.target_slot, false, &target_path,
++                                &target_dynamic) ||
++      source_dynamic || target_dynamic) {
++    LOG(ERROR) << "Unable to resolve distinct physical source and target ABLs";
++    return false;
++  }
++  using android::base::unique_fd;
++  unique_fd source(open(source_path.c_str(), O_RDONLY | O_CLOEXEC));
++  unique_fd target(open(target_path.c_str(), O_RDONLY | O_CLOEXEC));
++  struct stat src_stat {}, dst_stat {};
++  uint64_t size = 0, target_size = 0;
++  if (fstat(source.get(), &src_stat) || fstat(target.get(), &dst_stat) ||
++      !S_ISBLK(src_stat.st_mode) || !S_ISBLK(dst_stat.st_mode) ||
++      src_stat.st_rdev == dst_stat.st_rdev ||
++      ioctl(source.get(), BLKGETSIZE64, &size) ||
++      ioctl(target.get(), BLKGETSIZE64, &target_size) ||
++      !size || size != target_size) {
++    LOG(ERROR) << "Invalid physical ABL pair";
++    return false;
++  }
++  bool same;
++  if (!SameAbl(source.get(), target.get(), size, &same)) {
++    PLOG(ERROR) << "Unable to compare ABLs";
++    return false;
++  }
++  if (same) {
++    LOG(INFO) << "Target ABL already matches the running slot";
++    return true;
++  }
++  int readonly = 0, writable = 0;
++  if (ioctl(target.get(), BLKROGET, &readonly) ||
++      (readonly && ioctl(target.get(), BLKROSET, &writable))) {
++    PLOG(ERROR) << "Unable to make target ABL writable";
++    return false;
++  }
++  unique_fd writer(open(target_path.c_str(), O_WRONLY | O_CLOEXEC));
++  struct stat writer_stat {};
++  if (fstat(writer.get(), &writer_stat) || !S_ISBLK(writer_stat.st_mode) ||
++      writer_stat.st_rdev != dst_stat.st_rdev) {
++    PLOG(ERROR) << "Unable to open target ABL for restoration";
++    return false;
++  }
++  std::array<char, 65536> buf;
++  for (uint64_t offset = 0; offset < size;) {
++    const size_t len = std::min<uint64_t>(buf.size(), size - offset);
++    if (!android::base::ReadFullyAtOffset(source, buf.data(), len, offset) ||
++        !android::base::WriteFully(writer, buf.data(), len)) {
++      PLOG(ERROR) << "Unable to restore target ABL";
++      return false;
++    }
++    offset += len;
++  }
++  if (TEMP_FAILURE_RETRY(fsync(writer.get())) ||
++      !SameAbl(source.get(), target.get(), size, &same) || !same) {
++    LOG(ERROR) << "Target ABL readback failed";
++    return false;
++  }
++  LOG(INFO) << "Restored and verified target ABL from the running slot";
++  return true;
++}
++
++
+ class SideloadDaemonState : public DaemonStateInterface,
+                             public ServiceObserverInterface {
+  public:
+@@ -95,6 +195,8 @@ class SideloadDaemonState : public DaemonStateInterface,
+     brillo::MessageLoop::current()->BreakLoop();
+   }
+ 
++  void ReportAwaitingActivation() { ReportStatus("n6_ota_ready"); }
++
+   // Getters.
+   UpdateStatus status() { return status_; }
+   ErrorCode error_code() { return error_code_; }
+@@ -124,7 +226,7 @@ ErrorCode ApplyUpdatePayload(const string& payload,
+                         int64_t payload_offset,
+                         int64_t payload_size,
+                         const vector<string>& headers,
+-                        int64_t status_fd) {
++                        int64_t status_fd, int32_t activation_fd) {
+   brillo::BaseMessageLoop loop;
+   loop.SetAsCurrent();
+ 
+@@ -160,6 +262,26 @@ ErrorCode ApplyUpdatePayload(const string& payload,
+                                           hardware.get(),
+                                           nullptr);
+   update_attempter.Init();
++  android::base::unique_fd activation(activation_fd);
++  if (activation.ok()) {
++    if (fcntl(activation.get(), F_SETFD, FD_CLOEXEC) == -1 || status_fd < 0 ||
++        fcntl(status_fd, F_SETFD, FD_CLOEXEC) == -1)
++      return ErrorCode::kError;
++    update_attempter.SetSlotActivationGate([&](const InstallPlan& plan) {
++      sideload_daemon_state.ReportAwaitingActivation();
++      char command = 0;
++      if (TEMP_FAILURE_RETRY(read(activation.get(), &command, 1)) != 1 ||
++          command != 'C') {
++        LOG(INFO) << "OTA was not activated";
++        return ErrorCode::kUserCanceled;
++      }
++      if (boot_control->GetActiveBootSlot() != plan.source_slot ||
++          !RestoreTargetAbl(boot_control.get(), plan)) {
++        return ErrorCode::kPostinstallRunnerError;
++      }
++      return ErrorCode::kSuccess;
++    });
++  }
+ 
+   if (!update_attempter.ApplyPayload(
+           payload, payload_offset, payload_size, headers, nullptr)) {
+@@ -187,6 +309,7 @@ int main(int argc, char** argv) {
+                 "",
+                 "A list of key-value pairs, one element of the list per line.");
+   DEFINE_int64(status_fd, -1, "A file descriptor to notify the update status.");
++  DEFINE_int32(n6_activation_fd, -1, "Recovery OTA activation decision channel.");
+ 
+   chromeos_update_engine::Terminator::Init();
+   chromeos_update_engine::SetupLogging(true /* stderr */, false /* file */);
+@@ -201,5 +324,6 @@ int main(int argc, char** argv) {
+       FLAGS_headers, "\n", base::KEEP_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
+ 
+   return static_cast<int>(chromeos_update_engine::ApplyUpdatePayload(
+-      FLAGS_payload, FLAGS_offset, FLAGS_size, headers, FLAGS_status_fd));
++      FLAGS_payload, FLAGS_offset, FLAGS_size, headers, FLAGS_status_fd,
++      FLAGS_n6_activation_fd));
+ }
+diff --git a/aosp/update_attempter_android.cc b/aosp/update_attempter_android.cc
+index 461cece..93211a0 100644
+--- a/aosp/update_attempter_android.cc
++++ b/aosp/update_attempter_android.cc
+@@ -324,7 +324,8 @@ bool UpdateAttempterAndroid::ApplyPayload(
+         GetHeaderAsBool(headers[kPayloadDisableVABC], false);
+   }
+ 
+-  install_plan_.switch_slot_on_reboot =
++  install_plan_.require_inactive_target = static_cast<bool>(slot_activation_gate_);
++  install_plan_.switch_slot_on_reboot = install_plan_.require_inactive_target ||
+       GetHeaderAsBool(headers[kPayloadPropertySwitchSlotOnReboot], true);
+ 
+   install_plan_.run_post_install =
+diff --git a/aosp/update_attempter_android.h b/aosp/update_attempter_android.h
+index ac0cc51..0d0e30b 100644
+--- a/aosp/update_attempter_android.h
++++ b/aosp/update_attempter_android.h
+@@ -19,6 +19,7 @@
+ 
+ #include <stdint.h>
+ 
++#include <functional>
+ #include <memory>
+ #include <string>
+ #include <vector>
+@@ -71,6 +72,13 @@ class UpdateAttempterAndroid final
+ 
+   // Further initialization to be done post construction.
+   void Init();
++  void SetSlotActivationGate(std::function<ErrorCode(const InstallPlan&)> gate) {
++    slot_activation_gate_ = std::move(gate);
++  }
++  ErrorCode BeforeSlotActivation(const InstallPlan& plan) override {
++    return slot_activation_gate_ ? slot_activation_gate_(plan)
++                                 : ErrorCode::kSuccess;
++  }
+ 
+   // ServiceDelegateAndroidInterface overrides.
+   bool ApplyPayload(const std::string& payload_url,
+@@ -141,6 +149,7 @@ class UpdateAttempterAndroid final
+ 
+  private:
+   friend class UpdateAttempterAndroidTest;
++  std::function<ErrorCode(const InstallPlan&)> slot_activation_gate_;
+ 
+   // Return |true| only if slot switched successfully after an OTA reboot.
+   // This will return |false| if an downgrade OTA is applied. Because after a
+diff --git a/download_action.cc b/download_action.cc
+index 9a8c870..b50f07b 100644
+--- a/download_action.cc
++++ b/download_action.cc
+@@ -79,11 +79,22 @@ void DownloadAction::PerformAction() {
+   if (!payload_)
+     payload_ = &install_plan_.payloads[0];
+ 
++  if (install_plan_.require_inactive_target &&
++      boot_control_->GetActiveBootSlot() != install_plan_.source_slot) {
++    LOG(ERROR) << "The running slot is not the next boot slot; not staging OTA";
++    processor_->ActionComplete(this, ErrorCode::kInstallDeviceOpenError);
++    return;
++  }
+   LOG(INFO) << "Marking new slot as unbootable";
+   if (!boot_control_->MarkSlotUnbootable(install_plan_.target_slot)) {
+     LOG(WARNING) << "Unable to mark new slot "
+                  << BootControlInterface::SlotName(install_plan_.target_slot)
+-                 << ". Proceeding with the update anyway.";
++                 << ".";
++    if (install_plan_.require_inactive_target) {
++      processor_->ActionComplete(this, ErrorCode::kInstallDeviceOpenError);
++      return;
++    }
++    LOG(WARNING) << "Proceeding with the update anyway.";
+   }
+ 
+   StartDownloading();
+diff --git a/payload_consumer/install_plan.h b/payload_consumer/install_plan.h
+index e1c2c34..1e715ac 100644
+--- a/payload_consumer/install_plan.h
++++ b/payload_consumer/install_plan.h
+@@ -104,6 +104,8 @@ struct InstallPlan {
+   std::vector<Payload> payloads;
+ 
+   // The partition slots used for the update.
++  // Recovery's deferred commit relies on the running slot remaining preferred.
++  bool require_inactive_target = false;
+   BootControlInterface::Slot source_slot{BootControlInterface::kInvalidSlot};
+   BootControlInterface::Slot target_slot{BootControlInterface::kInvalidSlot};
+ 
+diff --git a/payload_consumer/postinstall_runner_action.cc b/payload_consumer/postinstall_runner_action.cc
+index 3b09916..cac048e 100644
+--- a/payload_consumer/postinstall_runner_action.cc
++++ b/payload_consumer/postinstall_runner_action.cc
+@@ -464,6 +464,11 @@ void PostinstallRunnerAction::CompletePostinstall(ErrorCode error_code) {
+   };
+   if (error_code == ErrorCode::kSuccess) {
+     if (install_plan_.switch_slot_on_reboot) {
++      if (delegate_) {
++        error_code = delegate_->BeforeSlotActivation(install_plan_);
++        if (error_code != ErrorCode::kSuccess)
++          return;
++      }
+       if (!boot_control_->GetDynamicPartitionControl()->FinishUpdate(
+               install_plan_.powerwash_required) ||
+           !boot_control_->SetActiveBootSlot(install_plan_.target_slot)) {
+diff --git a/payload_consumer/postinstall_runner_action.h b/payload_consumer/postinstall_runner_action.h
+index 1a3cdf6..84ada26 100644
+--- a/payload_consumer/postinstall_runner_action.h
++++ b/payload_consumer/postinstall_runner_action.h
+@@ -56,6 +56,9 @@ class PostinstallRunnerAction : public InstallPlanAction {
+     // Called whenever there is an overall progress update from the postinstall
+     // programs.
+     virtual void ProgressUpdate(double progress) = 0;
++    virtual ErrorCode BeforeSlotActivation(const InstallPlan&) {
++      return ErrorCode::kSuccess;
++    }
+   };
+ 
+   void set_delegate(DelegateInterface* delegate) { delegate_ = delegate; }

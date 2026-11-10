@@ -1,0 +1,30 @@
+#!/system/bin/sh
+# Start the N6 QSEE listener path; Fox handles encryption and MTP itself.
+set -eu
+PATH=/system/bin
+export PATH
+umask 022
+run=/tmp/plp110-crypto
+base=/system/libexec/plp110-fbe
+mkdir -p "$run/firmware" "$run/properties"
+slot="$(getprop ro.boot.slot_suffix)"
+mount -t vfat -o ro,nosuid,nodev,noexec,fmask=0133,dmask=0022 "/dev/block/bootdevice/by-name/modem$slot" "$run/firmware"
+if [ ! -d /sys/module/nxp_nci ]; then insmod "$base/modules/nxp-nci.ko" || true; fi
+# KeyMint must see the firmware SPL rather than the recovery build SPL.
+# The copy is private to KeyMint; the native Fox property area is untouched.
+cp -a /dev/__properties__/. "$run/properties/"
+"$base/bin/hal" prepare-properties
+"$base/bin/qsee" start >"$run/qsee.status" 2>&1 &
+qsee=$!
+trap 'kill "$qsee" 2>/dev/null || true' EXIT
+for unused in 1 2 3 4 5 6 7 8; do
+    kill -0 "$qsee" 2>/dev/null || exit 1
+    if grep -qx 'PLP110_QSEE_LISTENERS_READY' "$run/qsee.status"; then
+        setprop vendor.sys.listeners.registered true
+        setprop sys.plp110.qsee ready
+        wait "$qsee"
+        exit
+    fi
+    sleep 1
+done
+exit 1
