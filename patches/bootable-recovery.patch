@@ -1186,22 +1186,10 @@ index 40ca332..2b4f663 100755
  	static void Disable_Stock_Recovery_Replace(); // Disable stock ROMs from replacing OrangeFox with stock recovery
  	static void Disable_Stock_Recovery_Replace_Func(); // Disable stock ROMs from replacing OrangeFox with stock recovery (/system must be already mounted)	
 diff --git a/twrp.cpp b/twrp.cpp
-index d8221d5..48359b8 100644
+index d8221d5..a514745 100644
 --- a/twrp.cpp
 +++ b/twrp.cpp
-@@ -94,6 +94,11 @@ static void Decrypt_Page(bool SkipDecryption, bool datamedia) {
- 			LOGINFO("Is encrypted, do decrypt page first\n");
- 			if (DataManager::GetIntValue(TW_IS_FBE))
- 				DataManager::SetValue("tw_crypto_user_id", "0");
-+			// The modal credential page can remain open indefinitely. Apply the
-+			// native balanced default now; regular startup still loads preferences
-+			// and can apply the user's selected policy after this page returns.
-+			const unsigned policies = TWFunc::Apply_Balanced_Governor();
-+			LOGINFO("Applied balanced CPU governor to %u policies before decryption prompt\n", policies);
- 			if (gui_startPage("decrypt", 1, 1) != 0) {
- 				LOGERR("Failed to start decrypt GUI page.\n");
- 			} else {
-@@ -436,6 +441,8 @@ int main(int argc, char **argv) {
+@@ -436,6 +436,8 @@ int main(int argc, char **argv) {
  	setbuf(stderr, NULL);
  
  	signal(SIGPIPE, SIG_IGN);
@@ -1210,6 +1198,18 @@ index d8221d5..48359b8 100644
  
  	// Handle ADB sideload
  	if (argc == 3 && strcmp(argv[1], "--adbd") == 0) {
+@@ -449,6 +451,11 @@ int main(int argc, char **argv) {
+ 		return 0;
+ 	}
+ 
++	// Recovery and FastbootD both inherit the kernel's boot-time governor.
++	// Set the balanced default before partition setup or any blocking UI.
++	const unsigned policies = TWFunc::Apply_Balanced_Governor();
++	LOGINFO("Applied balanced CPU governor to %u policies during common startup\n", policies);
++
+ #ifdef RECOVERY_SDCARD_ON_DATA
+ 	datamedia = true;
+ #endif
 diff --git a/twrpApex.cpp b/twrpApex.cpp
 index 557283b..0485c65 100755
 --- a/twrpApex.cpp
