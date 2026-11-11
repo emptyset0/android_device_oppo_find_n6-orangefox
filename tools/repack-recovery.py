@@ -5,6 +5,7 @@ import ctypes as C
 import gzip
 import hashlib
 from pathlib import Path
+import re
 import stat
 import struct
 
@@ -14,6 +15,30 @@ LIMIT = 35880960
 SIZE = 104857600
 CORE = 'system/bin/recovery'
 SUMS = 'ramdisk-files.sha256sum'
+PROPS = 'prop.default'
+RECOVERY_PRODUCT_PROP = re.compile(
+    rb'ro\.product(?:\.(?:system|vendor|odm|product|system_ext|system_dlkm|vendor_dlkm|odm_dlkm))?'
+    rb'\.(device|model|name)'
+)
+LEGACY_IDENTITY = {
+    (b'device', b'plp110'): b'swangoose',
+    (b'model', b'PLP110'): b'Find N6',
+    (b'name', b'fox_plp110'): b'fox_swangoose',
+    (b'name', b'twrp_plp110'): b'twrp_swangoose',
+}
+
+
+def update_recovery_identity(data):
+    """Rename only legacy Recovery product fields in a v0.1.0 seed."""
+    def replace(m):
+        key, old = m.groups()
+        prop = RECOVERY_PRODUCT_PROP.fullmatch(key)
+        new = LEGACY_IDENTITY.get((prop[1], old)) if prop else None
+        if key == b'ro.build.product' and old == b'plp110':
+            new = b'swangoose'
+        return key + b'=' + new if new is not None else m[0]
+
+    return re.sub(rb'^([^=\r\n]+)=([^\r\n]*)', replace, data, flags=re.M)
 
 
 def align(value, size):
@@ -87,12 +112,17 @@ def main():
     by_name = {n: (f,d) for n,f,d,_ in records}
     assert len(by_name) == len(records) and core[:20] == by_name[CORE][1][:20] and core[:4] == b'\x7fELF'
     replacement = {CORE: core}
+    if PROPS in by_name:
+        old_props = by_name[PROPS][1]
+        new_props = update_recovery_identity(old_props)
+        if new_props != old_props:
+            replacement[PROPS] = new_props
     if args.clean_menu:
         from hide_unavailable_magisk import patch_advanced
         advanced = 'twres/pages/advanced.xml'
         replacement[advanced] = patch_advanced(by_name[advanced][1])
     checksums = b''.join(f'{sha(replacement.get(n, d))}  ./{n}\n'.encode()
-                         for n,f,d,_ in records if stat.S_ISREG(f[1]) and n not in (SUMS, 'prop.default'))
+                         for n,f,d,_ in records if stat.S_ISREG(f[1]) and n not in (SUMS, PROPS))
     replacement[SUMS] = checksums
     cpio = b''.join(entry(n,f,replacement[n]) if n in replacement else raw for n,f,d,raw in records)
     cpio = cpio.ljust(align(len(cpio),512), b'\0')

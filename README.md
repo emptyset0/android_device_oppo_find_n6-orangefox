@@ -6,7 +6,7 @@ Unofficial OrangeFox R12 port for OPPO Find N6. The device tree, source patches 
 
 GitHub's automatic **Source code** archives do not contain the flashable image.
 
-**Tested device:** PLP110, running CPH2765 APC A.40 with a compatible Canoe boot chain. The tree recognizes the N6 family identifiers `PLP110`, `PLP120`, `CPH2765`, `OP61A9L1` and `OP6271L1`; that is not a claim of hardware testing on every regional model. This is a Recovery image, not a conversion ROM or a bootloader unlock package.
+**Device codename:** `swangoose` (OPPO Find N6). **Tested variant:** PLP110, running CPH2765 APC A.40 with a compatible Canoe boot chain. The tree retains the stock OTA identifiers `PLP110`, `PLP120`, `CPH2765`, `OP61A9L1` and `OP6271L1`; that is not a claim of hardware testing on every regional model. This is a Recovery image, not a conversion ROM or a bootloader unlock package.
 
 ## Working and validation status
 

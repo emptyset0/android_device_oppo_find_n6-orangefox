@@ -15,8 +15,8 @@ def main():
     args = parser.parse_args()
     tree = args.tree.resolve()
     repo = Path(__file__).resolve().parents[1]
-    if repo != tree / 'device/oppo/plp110':
-        raise SystemExit('Clone this device tree to device/oppo/plp110 inside the synced Fox tree.')
+    if repo != tree / 'device/oppo/swangoose':
+        raise SystemExit('Clone this device tree to device/oppo/swangoose inside the synced Fox tree.')
     pins = json.loads((repo / 'manifest/project-pins.json').read_text())
     patches = []
     for project, pin in pins.items():

@@ -1,5 +1,5 @@
 #!/bin/bash
-export FOX_BUILD_DEVICE=plp110
+export FOX_BUILD_DEVICE=swangoose
 export FOX_AB_DEVICE=1
 export FOX_VIRTUAL_AB_DEVICE=1
 export OF_DISABLE_MIUI_SPECIFIC_FEATURES=1

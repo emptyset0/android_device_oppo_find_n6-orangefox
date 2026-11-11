@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-DEVICE_PATH := device/oppo/plp110
+DEVICE_PATH := device/oppo/swangoose
 $(call inherit-product, $(SRC_TARGET_DIR)/product/base.mk)
 $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit_only.mk)
 $(call inherit-product, vendor/twrp/config/common.mk)

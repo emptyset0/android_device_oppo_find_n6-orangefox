@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# Initial PLP110 A.36 source-built recovery. Not device tested.
-DEVICE_PATH := device/oppo/plp110
+# OPPO Find N6 (swangoose) OrangeFox recovery.
+DEVICE_PATH := device/oppo/swangoose
 TARGET_ARCH := arm64
 TARGET_ARCH_VARIANT := armv8-a
 TARGET_CPU_ABI := arm64-v8a
@@ -9,7 +9,7 @@ TARGET_NO_BOOTLOADER := true
 TARGET_BOOTLOADER_BOARD_NAME := canoe
 TARGET_BOARD_PLATFORM := canoe
 QCOM_BOARD_PLATFORMS += canoe
-TARGET_OTA_ASSERT_DEVICE := PLP120,PLP110,CPH2765,OP61A9L1,OP6271L1,plp110,plp120
+TARGET_OTA_ASSERT_DEVICE := PLP120,PLP110,CPH2765,OP61A9L1,OP6271L1,plp110,plp120,swangoose
 BUILD_BROKEN_DUP_RULES := true
 BUILD_BROKEN_ELF_PREBUILT_PRODUCT_COPY_FILES := true
 # Keep OEM layout: kernel is supplied by boot_a, not by recovery_a.
