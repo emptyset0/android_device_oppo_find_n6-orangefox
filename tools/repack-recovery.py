@@ -16,6 +16,7 @@ SIZE = 104857600
 CORE = 'system/bin/recovery'
 SUMS = 'ramdisk-files.sha256sum'
 PROPS = 'prop.default'
+HAL = 'system/libexec/plp110-fbe/bin/hal'
 RECOVERY_PRODUCT_PROP = re.compile(
     rb'ro\.product(?:\.(?:system|vendor|odm|product|system_ext|system_dlkm|vendor_dlkm|odm_dlkm))?'
     rb'\.(device|model|name)'
@@ -101,6 +102,7 @@ def main():
     parser.add_argument('recovery_elf', type=Path)
     parser.add_argument('output_image', type=Path)
     parser.add_argument('--clean-menu', action='store_true', help='hide unbundled Magisk add-on choices')
+    parser.add_argument('--crypto-hal', type=Path, help='replace the N6 OEM HAL launcher with a tested build')
     args = parser.parse_args()
     base = args.base_recovery.read_bytes()
     core = args.recovery_elf.read_bytes()
@@ -112,6 +114,11 @@ def main():
     by_name = {n: (f,d) for n,f,d,_ in records}
     assert len(by_name) == len(records) and core[:20] == by_name[CORE][1][:20] and core[:4] == b'\x7fELF'
     replacement = {CORE: core}
+    if args.crypto_hal:
+        hal = args.crypto_hal.read_bytes()
+        old_hal = by_name[HAL][1]
+        assert hal[:4] == b'\x7fELF' and hal[:20] == old_hal[:20]
+        replacement[HAL] = hal
     if PROPS in by_name:
         old_props = by_name[PROPS][1]
         new_props = update_recovery_identity(old_props)
