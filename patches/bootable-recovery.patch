@@ -293,13 +293,109 @@ index 959b366..7d088c5 100644
          gr_rotation = 0;
  
 diff --git a/minuitwrp/graphics_drm.cpp b/minuitwrp/graphics_drm.cpp
-index 0cc80f5..02b002b 100644
 --- a/minuitwrp/graphics_drm.cpp
 +++ b/minuitwrp/graphics_drm.cpp
-@@ -760,6 +760,26 @@ static drmModeCrtc *find_crtc_for_connector(int fd,
+@@ -53,7 +53,9 @@
+ 
+ #include <android-base/properties.h>
+ 
++#include <algorithm>
+ #include <array>
++#include <vector>
+ #include <map>
+ #include <string>
+ #include <drm_fourcc.h>
+@@ -232,7 +234,7 @@
+ static int drm_fd = -1;
+ 
+ static bool current_blank_state = true;
+-static int fb_prop_id;
++static uint32_t fb_prop_ids[NUM_PLANES];
+ static struct Crtc crtc_res;
+ static struct Connector conn_res;
+ static struct Plane plane_res[NUM_PLANES];
+@@ -333,7 +335,7 @@
+ 
+   for (i = 0; i < NUM_PLANES; ++i) {
+     obj = &plane_res[i];
+-    if (!obj || obj->plane->plane_id != obj_id)
++    if (!obj->plane || !obj->props || obj->plane->plane_id != obj_id)
+       continue;
+     prop_count = (int)obj->props->count_props;
+     for (j = 0; j < prop_count; ++j)
+@@ -464,14 +466,16 @@
+   int height = main_monitor_crtc->mode.vdisplay;
+   int zpos = 0;
+   src_y = 0;
+-  src_w = width/number_of_lms;
++  const uint32_t x0 = uint32_t(width) * plane / number_of_lms;
++  const uint32_t x1 = uint32_t(width) * (plane + 1) / number_of_lms;
++  src_w = x1 - x0;
+   src_h =  height;
+   crtc_y = 0;
+-  crtc_w = width/number_of_lms;
++  crtc_w = src_w;
+   crtc_h = height;
+ 
+-  src_x = (width/number_of_lms) * plane;
+-  crtc_x = (width/number_of_lms) * plane;
++  src_x = x0;
++  crtc_x = x0;
+ 
+   /* populate z-order property required for 4 layer mixer */
+   if (number_of_lms == 4)
+@@ -545,7 +549,7 @@
+       return ret;
+     }
+ 
+-    if (drmModeAtomicAddProperty(atomic_req, plane_res[i].plane->plane_id, fb_prop_id, 0) < 0) {
++    if (drmModeAtomicAddProperty(atomic_req, plane_res[i].plane->plane_id, fb_prop_ids[i], 0) < 0) {
+       printf("Failed to add property for plane_id=%d\n", plane_res[i].plane->plane_id);
+       return -EINVAL;
+     }
+@@ -760,42 +764,44 @@
                              drmModeRes *resources,
                              drmModeConnector *connector) {
      drmModeEncoder *encoder;
+-    /*
+-     * Find the encoder. If we already have one, just use it.
+-     */
++    // Prefer the live encoder route. Preserve the board's DSI pipeline
++    // ordering only when the bootloader has already detached the connector.
+     if (connector->encoder_id) {
+         encoder = drmModeGetEncoder(fd, connector->encoder_id);
+-    }
+-    else {
+-        encoder = nullptr;
+-    }
+-
+-    int32_t crtc;
+-    if (encoder && encoder->crtc_id) {
+-        crtc = encoder->crtc_id;
+-        drmModeFreeEncoder(encoder);
+-        return drmModeGetCrtc(fd, crtc);
+-    }
+-
+-    /*
+-     * Didn't find anything, try to find a crtc and encoder combo.
+-     */
+-    crtc = -1;
+-    for (int i = 0; i < connector->count_encoders; i++) {
+-        encoder = drmModeGetEncoder(fd, connector->encoders[i]);
+-
+         if (encoder) {
+-            for (int j = 0; j < resources->count_crtcs; j++) {
+-                if (!(encoder->possible_crtcs & (1 << j)))
+-                    continue;
+-                crtc = resources->crtcs[j];
+-                break;
+-            }
+-            if (crtc >= 0) {
++            uint32_t id = encoder->crtc_id;
++            drmModeFreeEncoder(encoder);
++            if (id) return drmModeGetCrtc(fd, id);
++        }
++    }
 +    // Keep the OEM primary/secondary pipeline association. After a failed or
 +    // blanked boot, encoder->crtc_id may be zero; choosing the first possible
 +    // CRTC then drives DSI-2 through the primary panel's vendor hooks.
@@ -311,19 +407,28 @@ index 0cc80f5..02b002b 100644
 +                encoder = drmModeGetEncoder(fd, connector->encoders[i]);
 +                if (!encoder) continue;
 +                bool supported = encoder->possible_crtcs & (1U << index);
-+                drmModeFreeEncoder(encoder);
+                 drmModeFreeEncoder(encoder);
+-                return drmModeGetCrtc(fd, crtc);
 +                if (supported) {
 +                    printf("PLP110 DSI-%u dedicated CRTC=%u index=%u\n",
 +                           connector->connector_type_id, resources->crtcs[index], index);
 +                    return drmModeGetCrtc(fd, resources->crtcs[index]);
 +                }
-+            }
-+        }
+             }
+         }
 +    }
-     /*
-      * Find the encoder. If we already have one, just use it.
-      */
-@@ -843,7 +863,24 @@ static drmModeConnector *find_main_monitor(int fd, drmModeRes *resources,
++    if (connector->connector_type == DRM_MODE_CONNECTOR_DSI) return nullptr;
++    for (int i = 0; i < connector->count_encoders; ++i) {
++        encoder = drmModeGetEncoder(fd, connector->encoders[i]);
++        if (!encoder) continue;
++        uint32_t mask = encoder->possible_crtcs;
++        drmModeFreeEncoder(encoder);
++        for (int j = 0; j < resources->count_crtcs && j < 32; ++j)
++            if (mask & (1U << j)) return drmModeGetCrtc(fd, resources->crtcs[j]);
+     }
+     return nullptr;
+ }
+@@ -843,7 +849,24 @@
  
      drmModeConnector *main_monitor_connector = nullptr;
      unsigned i = 0;
@@ -349,10 +454,11 @@ index 0cc80f5..02b002b 100644
          main_monitor_connector = find_used_connector_by_type(fd,
                                           resources,
                                           kConnectorPriority[i]);
-@@ -859,6 +896,14 @@ static drmModeConnector *find_main_monitor(int fd, drmModeRes *resources,
+@@ -858,6 +881,14 @@
+     /* If we still didn't find a connector, give up and return. */
      if (!main_monitor_connector)
          return nullptr;
- 
++
 +    // Generic connector fallback must not silently enable the other panel.
 +    if (main_monitor_connector->connector_type != DRM_MODE_CONNECTOR_DSI ||
 +        main_monitor_connector->connector_type_id != static_cast<uint32_t>(requested_dsi)) {
@@ -360,11 +466,10 @@ index 0cc80f5..02b002b 100644
 +        drmModeFreeConnector(main_monitor_connector);
 +        return nullptr;
 +    }
-+
+ 
      *mode_index = 0;
      for (int modes = 0; modes < main_monitor_connector->count_modes; modes++) {
-         if (main_monitor_connector->modes[modes].type &
-@@ -871,31 +916,178 @@ static drmModeConnector *find_main_monitor(int fd, drmModeRes *resources,
+@@ -871,31 +902,251 @@
      return main_monitor_connector;
  }
  
@@ -385,6 +490,14 @@ index 0cc80f5..02b002b 100644
 -
 -      if (drmModeAtomicAddProperty(atomic_req, main_monitor_crtc->crtc_id, prop_id, 0) < 0)
 -        return;
+-
+-    }
+-    drmModeFreeCrtc(crtc);
+-  }
+-  if (drmModeAtomicCommit(drm_fd, atomic_req,DRM_MODE_ATOMIC_ALLOW_MODESET, NULL))
+-    printf("Atomic Commit failed in DisableNonMainCrtcs\n");
+-
+-  drmModeAtomicFree(atomic_req);
 +static uint32_t probe_object_property(int fd, uint32_t id, uint32_t type, const char* name) {
 +  drmModeObjectProperties* props = drmModeObjectGetProperties(fd, id, type);
 +  if (!props) return 0;
@@ -400,15 +513,61 @@ index 0cc80f5..02b002b 100644
 +  drmModeFreeObjectProperties(props);
 +  return result;
 +}
- 
-+// PLP110 A.26's splash uses separate SSPPs for the two DSI pipelines. The
-+// driver's private splash ownership outlives an atomic FB_ID/CRTC_ID clear.
-+// Do not move either pair across CRTCs. The first real commit on the selected
-+// CRTC hands over that display's splash using its own two planes.
-+static uint32_t plp110_plane_id(uint32_t i) {
-+  const uint32_t outer[] = {146, 150};
-+  const uint32_t inner[] = {109, 142};
-+  return main_monitor_connector->connector_type_id == 2 ? outer[i] : inner[i];
++
++// Object IDs are allocated by the running DRM driver. Rank planes already
++// routed to this CRTC first, then free planes; never borrow a plane visibly
++// bound to the other panel. An unbound plane can still be reserved by SDE's
++// private splash state, so the caller must atomically test the full route.
++static uint64_t read_object_property(int fd, uint32_t id, uint32_t type, const char* name,
++                                     uint64_t fallback);
++
++static std::vector<uint32_t> scanout_candidates(int fd, drmModeRes* resources, uint32_t crtc) {
++  std::vector<uint32_t> bound, free;
++  uint32_t mask = 0;
++  for (int i = 0; i < resources->count_crtcs && i < 32; ++i)
++    if (resources->crtcs[i] == crtc) mask = 1U << i;
++  auto* list = drmModeGetPlaneResources(fd);
++  if (!list) return bound;
++  for (uint32_t i = 0; i < list->count_planes; ++i) {
++    auto* p = drmModeGetPlane(fd, list->planes[i]);
++    if (!p) continue;
++    const uint64_t type = read_object_property(fd, p->plane_id, DRM_MODE_OBJECT_PLANE, "type", 0);
++    if ((p->possible_crtcs & mask) && type != DRM_PLANE_TYPE_CURSOR) {
++      if (p->crtc_id == crtc) bound.push_back(p->plane_id);
++      else if (!p->crtc_id) free.push_back(p->plane_id);
++    }
++    drmModeFreePlane(p);
++  }
++  drmModeFreePlaneResources(list);
++  bound.insert(bound.end(), free.begin(), free.end());
++  return bound;
++}
++
++template <typename Try>
++static bool try_plane_combinations(const std::vector<uint32_t>& ids, uint32_t count,
++                                   std::array<uint32_t, NUM_PLANES>& chosen,
++                                   uint32_t depth, size_t first, const Try& test) {
++  if (depth == count) return test(chosen.data(), count);
++  for (size_t i = first; i + count - depth <= ids.size(); ++i) {
++    chosen[depth] = ids[i];
++    if (try_plane_combinations(ids, count, chosen, depth + 1, i + 1, test)) return true;
++  }
++  return false;
++}
++
++static uint64_t read_object_property(int fd, uint32_t id, uint32_t type, const char* name,
++                                     uint64_t fallback) {
++  auto* props = drmModeObjectGetProperties(fd, id, type);
++  if (!props) return fallback;
++  for (uint32_t i = 0; i < props->count_props; ++i) {
++    auto* p = drmModeGetProperty(fd, props->props[i]);
++    if (!p) continue;
++    const bool match = !strcmp(p->name, name);
++    drmModeFreeProperty(p);
++    if (match) { fallback = props->prop_values[i]; break; }
++  }
++  drmModeFreeObjectProperties(props);
++  return fallback;
 +}
 +
 +// A disconnected atomic connector can still be showing bootloader GRAM.
@@ -426,13 +585,17 @@ index 0cc80f5..02b002b 100644
 +        c->connection == DRM_MODE_CONNECTED && c->count_modes) {
 +      inner = c;
 +      break;
-     }
--    drmModeFreeCrtc(crtc);
++    }
 +    drmModeFreeConnector(c);
 +  }
 +  if (!inner) return false;
-+  const uint32_t crtc = resources->crtcs[0];
-+  const uint32_t pipes[] = {109, 142};
++  auto* route = find_crtc_for_connector(fd, resources, inner);
++  const uint32_t crtc = route ? route->crtc_id : 0;
++  if (route) drmModeFreeCrtc(route);
++  if (!crtc || crtc == main_monitor_crtc->crtc_id) {
++    drmModeFreeConnector(inner);
++    return false;
++  }
 +  uint32_t dpms = DRM_MODE_DPMS_ON;
 +  for (int i = 0; i < inner->count_props; ++i) {
 +    auto* p = drmModeGetProperty(fd, inner->props[i]);
@@ -448,24 +611,18 @@ index 0cc80f5..02b002b 100644
 +  for (int i = 0; i < inner->count_modes; ++i) {
 +    if (inner->modes[i].type & DRM_MODE_TYPE_PREFERRED) { mode = inner->modes[i]; break; }
 +  }
-+  if (mode.hdisplay != 2480 || mode.vdisplay != 2248 || crtc != 219 ||
-+      main_monitor_crtc->crtc_id != 287) {
++  const uint32_t mixers = get_topology_lm_number(fd, read_object_property(
++      fd, inner->connector_id, DRM_MODE_OBJECT_CONNECTOR, "mode_properties", 0));
++  const auto candidates = scanout_candidates(fd, resources, crtc);
++  if (!mixers || mixers > NUM_PLANES || candidates.size() < mixers) {
 +    drmModeFreeConnector(inner);
 +    return false;
-   }
--  if (drmModeAtomicCommit(drm_fd, atomic_req,DRM_MODE_ATOMIC_ALLOW_MODESET, NULL))
--    printf("Atomic Commit failed in DisableNonMainCrtcs\n");
-+  for (uint32_t id : pipes) {
-+    auto* p = drmModeGetPlane(fd, id);
-+    bool ok = p && (p->possible_crtcs & 1) && (!p->crtc_id || p->crtc_id == crtc);
-+    if (p) drmModeFreePlane(p);
-+    if (!ok) { drmModeFreeConnector(inner); return false; }
 +  }
 +  auto* black = drm_create_surface(mode.hdisplay, mode.vdisplay);
 +  uint32_t blob = 0;
 +  bool ok = black && !drmModeCreatePropertyBlob(fd, &mode, sizeof(mode), &blob);
 +  if (ok) memset(black->base.data, 0, black->base.height * black->base.row_bytes);
-+  auto make_request = [&](bool enable) {
++  auto make_request = [&](bool enable, const uint32_t* pipes, uint32_t count) {
 +    auto* req = drmModeAtomicAlloc();
 +    if (!req) return req;
 +    bool good = true;
@@ -476,17 +633,18 @@ index 0cc80f5..02b002b 100644
 +    add(inner->connector_id, DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID", enable ? crtc : 0);
 +    add(crtc, DRM_MODE_OBJECT_CRTC, "MODE_ID", enable ? blob : 0);
 +    add(crtc, DRM_MODE_OBJECT_CRTC, "ACTIVE", enable);
-+    const uint32_t w = mode.hdisplay / 2;
-+    for (uint32_t i = 0; i < 2; ++i) {
++    for (uint32_t i = 0; i < count; ++i) {
++      const uint32_t x = uint32_t(mode.hdisplay) * i / count;
++      const uint32_t w = uint32_t(mode.hdisplay) * (i + 1) / count - x;
 +      const uint32_t p = pipes[i], t = DRM_MODE_OBJECT_PLANE;
 +      add(p, t, "FB_ID", enable ? black->fb_id : 0);
 +      add(p, t, "CRTC_ID", enable ? crtc : 0);
 +      if (!enable) continue;
-+      add(p, t, "CRTC_X", w*i);
++      add(p, t, "CRTC_X", x);
 +      add(p, t, "CRTC_Y", 0);
 +      add(p, t, "CRTC_W", w);
 +      add(p, t, "CRTC_H", mode.vdisplay);
-+      add(p, t, "SRC_X", (w*i)<<16);
++      add(p, t, "SRC_X", x<<16);
 +      add(p, t, "SRC_Y", 0);
 +      add(p, t, "SRC_W", w<<16);
 +      add(p, t, "SRC_H", uint32_t(mode.vdisplay)<<16);
@@ -496,16 +654,22 @@ index 0cc80f5..02b002b 100644
 +  };
 +  if (ok) {
 +    const uint32_t flags = DRM_MODE_ATOMIC_ALLOW_MODESET;
-+    auto* on = make_request(true);
-+    auto* off = make_request(false);
-+    int ret = (on && off) ? drmModeAtomicCommit(fd, on, flags | DRM_MODE_ATOMIC_TEST_ONLY, nullptr)
-+                          : -EINVAL;
++    std::array<uint32_t, NUM_PLANES> chosen{};
++    auto* on = static_cast<drmModeAtomicReqPtr>(nullptr);
++    ok = try_plane_combinations(candidates, mixers, chosen, 0, 0,
++        [&](const uint32_t* pipes, uint32_t count) {
++          on = make_request(true, pipes, count);
++          if (on && !drmModeAtomicCommit(fd, on, flags | DRM_MODE_ATOMIC_TEST_ONLY, nullptr))
++            return true;
++          if (on) drmModeAtomicFree(on);
++          on = nullptr;
++          return false;
++        });
++    auto* off = ok ? make_request(false, chosen.data(), mixers) : nullptr;
++    int ret = off ? drmModeAtomicCommit(fd, on, flags, nullptr) : -EINVAL;
 +    if (!ret) {
-+      ret = drmModeAtomicCommit(fd, on, flags, nullptr);
-+      if (!ret) {
-+        printf("PLP110 inner splash: black takeover committed\n");
-+        ret = drmModeAtomicCommit(fd, off, flags, nullptr);
-+      }
++      printf("PLP110 inner splash: black takeover committed\n");
++      ret = drmModeAtomicCommit(fd, off, flags, nullptr);
 +    }
 +    if (on) drmModeAtomicFree(on);
 +    if (off) drmModeAtomicFree(off);
@@ -518,53 +682,80 @@ index 0cc80f5..02b002b 100644
 +  if (ok) printf("PLP110 inner splash: disable committed\n");
 +  return ok;
 +}
- 
--  drmModeAtomicFree(atomic_req);
-+// Recovery is the only display client. Drop the unselected DRM state without
-+// disabling/re-enabling the selected DSI panel during the splash transition.
-+static bool release_boot_display_state(int fd, drmModeRes* resources) {
-+  drmModeAtomicReqPtr req = drmModeAtomicAlloc();
-+  if (!req) return false;
++
++// Clear unselected state in the same transaction as the new scanout. A
++// rejected route must not detach the current display during candidate trials.
++static bool append_boot_display_cleanup(int fd, drmModeRes* resources, drmModeAtomicReqPtr req,
++                                       const uint32_t* keep, uint32_t count) {
 +  bool valid = true;
 +  auto clear = [&](uint32_t object, uint32_t type, const char* name) {
 +    uint32_t prop = probe_object_property(fd, object, type, name);
 +    if (!prop || drmModeAtomicAddProperty(req, object, prop, 0) < 0) valid = false;
 +  };
-+  drmModePlaneRes* planes = drmModeGetPlaneResources(fd);
-+  if (!planes) { drmModeAtomicFree(req); return false; }
++  auto* planes = drmModeGetPlaneResources(fd);
++  if (!planes) return false;
 +  for (uint32_t i = 0; i < planes->count_planes; ++i) {
-+    if (planes->planes[i] == plp110_plane_id(0) ||
-+        planes->planes[i] == plp110_plane_id(1)) continue;
-+    clear(planes->planes[i], DRM_MODE_OBJECT_PLANE, "FB_ID");
-+    clear(planes->planes[i], DRM_MODE_OBJECT_PLANE, "CRTC_ID");
++    uint32_t id = planes->planes[i];
++    if (std::find(keep, keep + count, id) != keep + count) continue;
++    clear(id, DRM_MODE_OBJECT_PLANE, "FB_ID");
++    clear(id, DRM_MODE_OBJECT_PLANE, "CRTC_ID");
 +  }
 +  drmModeFreePlaneResources(planes);
-+  for (int i = 0; i < resources->count_connectors; ++i) {
-+    if (resources->connectors[i] == main_monitor_connector->connector_id) continue;
-+    clear(resources->connectors[i], DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID");
-+  }
++  for (int i = 0; i < resources->count_connectors; ++i)
++    if (resources->connectors[i] != main_monitor_connector->connector_id)
++      clear(resources->connectors[i], DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID");
 +  for (int i = 0; i < resources->count_crtcs; ++i) {
 +    if (resources->crtcs[i] == main_monitor_crtc->crtc_id) continue;
 +    clear(resources->crtcs[i], DRM_MODE_OBJECT_CRTC, "ACTIVE");
 +    clear(resources->crtcs[i], DRM_MODE_OBJECT_CRTC, "MODE_ID");
 +  }
-+  int ret = valid ? drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, nullptr) : -EINVAL;
-+  drmModeAtomicFree(req);
-+  if (ret) printf("PLP110 boot display handoff failed ret=%d errno=%d\n", ret, errno);
-+  else {
-+    printf("PLP110 boot display handoff: unselected DRM state cleared\n");
-+    // Also extinguish the unselected panel's inherited splash backlight.
-+    const char* inactive = main_monitor_connector->connector_type_id == 2 ?
-+        "/sys/class/backlight/panel0-backlight/brightness" :
-+        "/sys/class/backlight/panel1-backlight/brightness";
-+    int bl = open(inactive, O_WRONLY | O_CLOEXEC);
-+    if (bl >= 0) { if (write(bl, "0", 1) != 1) perror("inactive panel backlight"); close(bl); }
++  return valid;
++}
++
++static void free_plane_resources() {
++  for (auto& obj : plane_res) {
++    if (obj.props_info && obj.props) {
++      for (uint32_t j = 0; j < obj.props->count_props; ++j)
++        if (obj.props_info[j]) drmModeFreeProperty(obj.props_info[j]);
++      free(obj.props_info);
++    }
++    if (obj.props) drmModeFreeObjectProperties(obj.props);
++    if (obj.plane) drmModeFreePlane(obj.plane);
++    obj = {};
 +  }
-+  return ret == 0;
++}
++
++static bool load_plane_resources(int fd, const uint32_t* ids, uint32_t count) {
++  free_plane_resources();
++  for (uint32_t i = 0; i < count; ++i) {
++    auto& obj = plane_res[i];
++    obj.plane = drmModeGetPlane(fd, ids[i]);
++    obj.props = drmModeObjectGetProperties(fd, ids[i], DRM_MODE_OBJECT_PLANE);
++    if (!obj.plane || !obj.props) return false;
++    obj.props_info = static_cast<drmModePropertyRes**>(
++        calloc(obj.props->count_props, sizeof(*obj.props_info)));
++    if (!obj.props_info) return false;
++    for (uint32_t j = 0; j < obj.props->count_props; ++j) {
++      obj.props_info[j] = drmModeGetProperty(fd, obj.props->props[j]);
++      if (!obj.props_info[j]) return false;
++    }
++    fb_prop_ids[i] = find_plane_prop_id(ids[i], "FB_ID", plane_res);
++    if (!fb_prop_ids[i]) return false;
++  }
++  return true;
  }
  
  static void update_plane_fb() {
-@@ -953,6 +1145,12 @@ static GRSurface* drm_init(minui_backend* backend __unused) {
+@@ -917,7 +1168,7 @@
+   /* Add property */
+   for(i = 0; i < number_of_lms; i++)
+     drmModeAtomicAddProperty(atomic_req, plane_res[i].plane->plane_id,
+-                             fb_prop_id, drm_surfaces[current_buffer]->fb_id);
++                             fb_prop_ids[i], drm_surfaces[current_buffer]->fb_id);
+ 
+   /* Commit changes */
+   int32_t ret;
+@@ -953,6 +1204,12 @@
        continue;
  
      }
@@ -577,77 +768,120 @@ index 0cc80f5..02b002b 100644
      res = drmModeGetResources(drm_fd);
      if (!res) {
        close(drm_fd);
-@@ -993,7 +1191,12 @@ static GRSurface* drm_init(minui_backend* backend __unused) {
+@@ -993,16 +1250,15 @@
      return nullptr;
    }
  
 -  disable_non_main_crtcs(drm_fd, res, main_monitor_crtc);
+-
 +  if (!retire_inner_splash(drm_fd, res)) {
 +    printf("PLP110 inner splash could not be retired; continue outer rescue UI\n");
 +  }
-+  if (!release_boot_display_state(drm_fd, res)) {
-+    drmModeFreeResources(res); close(drm_fd); drm_fd = -1; return nullptr;
-+  }
- 
    main_monitor_crtc->mode = main_monitor_connector->modes[selected_mode];
  
-@@ -1038,8 +1241,6 @@ static GRSurface* drm_init(minui_backend* backend __unused) {
+   int width = main_monitor_crtc->mode.hdisplay;
+   int height = main_monitor_crtc->mode.vdisplay;
+ 
+   printf("width: %d, height: %d\n", width, height);
+-
+-  drmModeFreeResources(res);
+ 
+   drm_surfaces[0] = drm_create_surface(width, height);
+   drm_surfaces[1] = drm_create_surface(width, height);
+@@ -1038,13 +1294,6 @@
  
    current_buffer = 0;
  
 -  drmSetClientCap(drm_fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
 -  drmSetClientCap(drm_fd, DRM_CLIENT_CAP_ATOMIC, 1);
+-
+- /* Get possible plane_ids */
+-  drmModePlaneRes *plane_options = drmModeGetPlaneResources(drm_fd);
+-  if (!plane_options || !plane_options->planes || (plane_options->count_planes < number_of_lms))
+-    return NULL;
  
-  /* Get possible plane_ids */
-   drmModePlaneRes *plane_options = drmModeGetPlaneResources(drm_fd);
-@@ -1097,12 +1298,27 @@ static GRSurface* drm_init(minui_backend* backend __unused) {
+   /* Set crtc resources */
+   crtc_res.props = drmModeObjectGetProperties(drm_fd,
+@@ -1097,31 +1346,6 @@
      }
    }
  
 -  /* Set plane resources */
-+  /* Use the board's measured splash pipe pairs, not global enumeration order. */
-+  if (number_of_lms != 2) {
-+    printf("PLP110 unexpected display topology: %u mixers\n", number_of_lms);
-+    drmModeFreePlaneResources(plane_options);
-+    return nullptr;
-+  }
-+  const uint32_t target_mask = 1U << (main_monitor_connector->connector_type_id - 1);
-   for(uint32_t i = 0; i < number_of_lms; ++i) {
+-  for(uint32_t i = 0; i < number_of_lms; ++i) {
 -    plane_res[i].plane = drmModeGetPlane(drm_fd, plane_options->planes[i]);
 -    if (!plane_res[i].plane)
 -      return NULL;
-+    auto* plane = drmModeGetPlane(drm_fd, plp110_plane_id(i));
-+    if (!plane || !(plane->possible_crtcs & target_mask) ||
-+        (plane->crtc_id && plane->crtc_id != main_monitor_crtc->crtc_id)) {
-+      printf("PLP110 plane %u incompatible with CRTC %u\n",
-+             plp110_plane_id(i), main_monitor_crtc->crtc_id);
-+      if (plane) drmModeFreePlane(plane);
-+      drmModeFreePlaneResources(plane_options);
-+      return nullptr;
-+    }
-+    plane_res[i].plane = plane;
+-  }
+-
+-  for (uint32_t i = 0; i < number_of_lms; ++i) {
+-    struct Plane *obj = &plane_res[i];
+-    unsigned int j;
+-    obj->props = drmModeObjectGetProperties(drm_fd, obj->plane->plane_id,
+-                    DRM_MODE_OBJECT_PLANE);
+-    if (!obj->props)
+-      continue;
+-    obj->props_info = static_cast<drmModePropertyRes **>
+-                         (calloc(obj->props->count_props, sizeof(*obj->props_info)));
+-    if (!obj->props_info)
+-      continue;
+-    for (j = 0; j < obj->props->count_props; ++j)
+-      obj->props_info[j] = drmModeGetProperty(drm_fd, obj->props->props[j]);
+-  }
+-
+-  drmModeFreePlaneResources(plane_options);
+-  plane_options = NULL;
+-
+   /* Setup spr blob id if enabled */
+   if (spr_enabled) {
+     if (SetupSprBlob(drm_fd, spr_prop_name, &crtc_res.spr_blob_id)) {
+@@ -1136,12 +1360,46 @@
+     return NULL;
    }
-+  printf("PLP110 DSI-%u planes=%u,%u\n", main_monitor_connector->connector_type_id,
-+         plp110_plane_id(0), plp110_plane_id(1));
  
-   for (uint32_t i = 0; i < number_of_lms; ++i) {
-     struct Plane *obj = &plane_res[i];
-@@ -1141,7 +1357,19 @@ static GRSurface* drm_init(minui_backend* backend __unused) {
-   prop_id = find_plane_prop_id(plane_res[0].plane->plane_id, "FB_ID", plane_res);
-   fb_prop_id = prop_id;
- 
+-  /* Save fb_prop_id*/
+-  uint32_t prop_id;
+-  prop_id = find_plane_prop_id(plane_res[0].plane->plane_id, "FB_ID", plane_res);
+-  fb_prop_id = prop_id;
+-
 -  drm_blank(nullptr, false);
-+  drmModeAtomicReqPtr initial = drmModeAtomicAlloc();
-+  int ret = initial ? setup_pipeline(initial) : -ENOMEM;
-+  if (!ret) ret = drmModeAtomicCommit(drm_fd, initial,
-+      DRM_MODE_ATOMIC_ALLOW_MODESET | DRM_MODE_ATOMIC_TEST_ONLY, nullptr);
-+  if (!ret) ret = drmModeAtomicCommit(drm_fd, initial,
-+      DRM_MODE_ATOMIC_ALLOW_MODESET, nullptr);
++  const auto candidates = scanout_candidates(drm_fd, res, main_monitor_crtc->crtc_id);
++  std::array<uint32_t, NUM_PLANES> chosen{};
++  auto* initial = static_cast<drmModeAtomicReqPtr>(nullptr);
++  const uint32_t flags = DRM_MODE_ATOMIC_ALLOW_MODESET;
++  const bool found = number_of_lms > 0 && number_of_lms <= NUM_PLANES &&
++      try_plane_combinations(candidates, number_of_lms, chosen, 0, 0,
++          [&](const uint32_t* ids, uint32_t count) {
++            if (!load_plane_resources(drm_fd, ids, count)) return false;
++            initial = drmModeAtomicAlloc();
++            if (!initial) return false;
++            if (append_boot_display_cleanup(drm_fd, res, initial, ids, count) &&
++                !setup_pipeline(initial) &&
++                !drmModeAtomicCommit(drm_fd, initial, flags | DRM_MODE_ATOMIC_TEST_ONLY, nullptr))
++              return true;
++            drmModeAtomicFree(initial);
++            initial = nullptr;
++            return false;
++          });
++  const int ret = found ? drmModeAtomicCommit(drm_fd, initial, flags, nullptr) : -EINVAL;
 +  if (initial) drmModeAtomicFree(initial);
++  drmModeFreeResources(res);
 +  if (ret) {
-+    printf("PLP110 initial DRM commit failed, rc=%d\n", ret);
-+    return nullptr;  // Do not run the DRM flip loop on a failed modeset.
++    free_plane_resources();
++    printf("PLP110 no usable DRM route (DSI-%u, CRTC %u, %u mixers, %zu planes, rc=%d)\n",
++           main_monitor_connector->connector_type_id, main_monitor_crtc->crtc_id,
++           number_of_lms, candidates.size(), ret);
++    return nullptr;
 +  }
++  printf("PLP110 DSI-%u runtime CRTC=%u planes:", main_monitor_connector->connector_type_id,
++         main_monitor_crtc->crtc_id);
++  for (uint32_t i = 0; i < number_of_lms; ++i) printf(" %u", chosen[i]);
++  printf("\n");
++  const char* inactive = main_monitor_connector->connector_type_id == 2 ?
++      "/sys/class/backlight/panel0-backlight/brightness" :
++      "/sys/class/backlight/panel1-backlight/brightness";
++  int bl = open(inactive, O_WRONLY | O_CLOEXEC);
++  if (bl >= 0) { if (write(bl, "0", 1) != 1) perror("inactive panel backlight"); close(bl); }
++
 +  current_blank_state = false;
 +  printf("Atomic Commit succeed\n");
  

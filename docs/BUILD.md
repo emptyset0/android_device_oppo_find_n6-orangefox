@@ -21,11 +21,18 @@ The release uses a consolidated, N6-specific ramdisk containing the already inte
 ```sh
 version=dev
 build_date=$(date +%Y%m%d)
+product_out=out/target/product/swangoose/recovery/root
+# Build the HAL as described in docs/CRYPTO-HAL.md before repacking.
 python3 device/oppo/swangoose/tools/repack-recovery.py \
-  /path/to/orangefox_r12.0_oppo_find_n6_v0.1.0_20261110.img \
-  out/target/product/swangoose/recovery/root/system/bin/recovery \
-  "orangefox_r12.0_oppo_find_n6_swangoose_${version}_${build_date}.img"
+  /path/to/orangefox_r12.0_oppo_find_n6_swangoose_v0.1.1_20261112.img \
+  "$product_out/system/bin/recovery" \
+  "orangefox_r12.0_oppo_find_n6_swangoose_${version}_${build_date}.img" \
+  --crypto-hal /path/to/rebuilt/crypto-hal \
+  --minuitwrp "$product_out/system/lib64/libminuitwrp.so"
 ```
+
+Use the Recovery copy of `libminuitwrp.so` from the same build as the executable.
+Without `--minuitwrp`, the repacker preserves the seed's DRM implementation.
 
 For the optional CPU-temperature build, run `python3 device/oppo/swangoose/tools/apply_cpu_temperature.py "$PWD"` after `apply-source.py` and before building. This only changes the display data source.
 

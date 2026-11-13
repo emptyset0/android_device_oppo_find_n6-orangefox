@@ -17,6 +17,7 @@ CORE = 'system/bin/recovery'
 SUMS = 'ramdisk-files.sha256sum'
 PROPS = 'prop.default'
 HAL = 'system/libexec/plp110-fbe/bin/hal'
+MINUI = 'system/lib64/libminuitwrp.so'
 RECOVERY_PRODUCT_PROP = re.compile(
     rb'ro\.product(?:\.(?:system|vendor|odm|product|system_ext|system_dlkm|vendor_dlkm|odm_dlkm))?'
     rb'\.(device|model|name)'
@@ -103,6 +104,7 @@ def main():
     parser.add_argument('output_image', type=Path)
     parser.add_argument('--clean-menu', action='store_true', help='hide unbundled Magisk add-on choices')
     parser.add_argument('--crypto-hal', type=Path, help='replace the N6 OEM HAL launcher with a tested build')
+    parser.add_argument('--minuitwrp', type=Path, help='replace the rebuilt minuitwrp DRM backend')
     args = parser.parse_args()
     base = args.base_recovery.read_bytes()
     core = args.recovery_elf.read_bytes()
@@ -119,6 +121,10 @@ def main():
         old_hal = by_name[HAL][1]
         assert hal[:4] == b'\x7fELF' and hal[:20] == old_hal[:20]
         replacement[HAL] = hal
+    if args.minuitwrp:
+        minui = args.minuitwrp.read_bytes()
+        assert minui[:4] == b'\x7fELF' and minui[:20] == by_name[MINUI][1][:20]
+        replacement[MINUI] = minui
     if PROPS in by_name:
         old_props = by_name[PROPS][1]
         new_props = update_recovery_identity(old_props)
