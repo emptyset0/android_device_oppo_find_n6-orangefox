@@ -2,7 +2,7 @@
 
 Unofficial OrangeFox R12 port for OPPO Find N6. The device tree, source patches and packaging tools are here.
 
-**[Download the flashable image](https://github.com/emptyset0/android_device_oppo_find_n6-orangefox/releases/download/v0.1.0/orangefox_r12.0_oppo_find_n6_v0.1.0_20261110.img)** · [sha256sums.txt](https://github.com/emptyset0/android_device_oppo_find_n6-orangefox/releases/download/v0.1.0/sha256sums.txt) · [Release notes](https://github.com/emptyset0/android_device_oppo_find_n6-orangefox/releases/tag/v0.1.0)
+**[Download the flashable image from Releases](https://github.com/emptyset0/android_device_oppo_find_n6-orangefox/releases)**. Use the checksum and release notes attached to the same version as the image.
 
 GitHub's automatic **Source code** archives do not contain the flashable image.
 
@@ -21,11 +21,11 @@ GitHub's automatic **Source code** archives do not contain the flashable image.
 | Vibration, flashlight, display idle | Tested. PIN idle uses the balanced governor; timeout and touch wake verified. |
 | KernelSU | Separate offline LKM image preparation only; not a built-in one-tap installer. See [KernelSU](docs/KERNELSU.md). |
 
-USB can fall back to High-Speed across reboots, including on Android. The release includes the lock-screen CPU temperature fix and hides Magisk add-on choices that have no bundled installer. The genuine installed Magisk module manager and `magiskboot` remain available as before.
+USB can fall back to High-Speed across reboots, including on Android. See the versioned release notes for fixes. Magisk add-on choices without a bundled installer are hidden; the installed Magisk module manager and `magiskboot` remain available.
 
 ## Install and recover
 
-Use the 100 MiB `orangefox_r12.0_oppo_find_n6_v0.1.0_20261110.img` release asset, not the raw build output. The gzip ramdisk fits the N6 limit and preserves the original recovery AVB envelope; it is not newly OEM-signed. A stock locked bootloader is not an installation path. Before writing anything, identify the active slot and prove that your recovery/rollback path is available. Canoe Bootloader Fastboot and Fox FastbootD are **not** interchangeable.
+Use the 100 MiB `.img` attached to the chosen release, not the raw build output. The gzip ramdisk fits the N6 limit and preserves the original recovery AVB envelope; it is not newly OEM-signed. A stock locked bootloader is not an installation path. Before writing anything, identify the active slot and prove that your recovery/rollback path is available. Canoe Bootloader Fastboot and Fox FastbootD are **not** interchangeable.
 
 On the tested setup, Canoe could back up, write and fully read back a single `recovery_<slot>` partition. Save its original image and verify its hash. Flash only the intended Recovery slot, read back and compare to `sha256sums.txt`, and verify both normal boot and Recovery. Do not replace `abl`, `efisp`, `persist`, GPT or the other slot as part of this installation. Intermittent Canoe USB enumeration and the absence of independently verified EDL write access mean A/B is not, by itself, a guaranteed rescue path.
 

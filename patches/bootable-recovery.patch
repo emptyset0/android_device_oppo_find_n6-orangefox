@@ -1,8 +1,96 @@
 diff --git a/data.cpp b/data.cpp
-index f67a0ec..5255f26 100644
 --- a/data.cpp
 +++ b/data.cpp
-@@ -1370,8 +1370,19 @@ void DataManager::SetDefaultValues()
+@@ -24,6 +24,7 @@
+ #include <string>
+ #include <sstream>
+ #include <fstream>
++#include <dirent.h>
+ #include <cctype>
+ #include <cutils/properties.h>
+ #include <unistd.h>
+@@ -67,6 +68,55 @@
+ string DataManager::bPassType = "0"; 
+ 
+ extern bool datamedia;
++
++
++namespace {
++long ReadRecoveryCpuTemperature(const std::string& path) {
++  std::ifstream file(path);
++  long milli_celsius = 0;
++  // A powered-down thermal zone can return 0 or fail to supply a sample.
++  return (file >> milli_celsius) && milli_celsius >= 1000 && milli_celsius < 150000
++      ? milli_celsius : 0;
++}
++
++long GetRecoveryCpuTemperature(std::string& preferred) {
++#ifdef TW_CUSTOM_CPU_TEMP_PATH
++  if (const long temp = ReadRecoveryCpuTemperature(EXPAND(TW_CUSTOM_CPU_TEMP_PATH)))
++    return temp;
++#endif
++  if (!preferred.empty()) {
++    if (const long temp = ReadRecoveryCpuTemperature(preferred))
++      return temp;
++    preferred.clear();
++  }
++  const std::string root = "/sys/class/thermal";
++  if (DIR* dir = opendir(root.c_str())) {
++    long best = 0;
++    while (const auto* entry = readdir(dir)) {
++      const std::string name(entry->d_name);
++      if (name.compare(0, 12, "thermal_zone") != 0)
++        continue;
++      const std::string zone = root + "/" + name;
++      std::string type;
++      std::ifstream(zone + "/type") >> type;
++      // N6's direct CPU sensors have cpu-N-N-N labels, independent of zone number.
++      unsigned cluster, core, sensor;
++      char trailing;
++      if (sscanf(type.c_str(), "cpu-%u-%u-%u%c", &cluster, &core, &sensor, &trailing) != 3)
++        continue;
++      const long temp = ReadRecoveryCpuTemperature(zone + "/temp");
++      if (temp > best) {
++        best = temp;
++        preferred = zone + "/temp";
++      }
++    }
++    closedir(dir);
++    if (best)
++      return best;
++  }
++  return ReadRecoveryCpuTemperature(root + "/thermal_zone0/temp");
++}
++}  // namespace
+ 
+ #ifndef PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP
+ pthread_mutex_t DataManager::m_valuesLock =
+@@ -1039,22 +1089,8 @@
+   printf("TW_NO_CPU_TEMP := true\n");
+   mConst.SetValue("tw_no_cpu_temp", "1");
+ #else
+-  string cpu_temp_file;
+-#ifdef TW_CUSTOM_CPU_TEMP_PATH
+-  cpu_temp_file = EXPAND(TW_CUSTOM_CPU_TEMP_PATH);
+-#else
+-  cpu_temp_file = "/sys/class/thermal/thermal_zone0/temp";
+-#endif
+-  if (TWFunc::Path_Exists(cpu_temp_file))
+-    {
+-      mConst.SetValue("tw_no_cpu_temp", "0");
+-    }
+-  else
+-    {
+-      LOGINFO("CPU temperature file '%s' not found, disabling CPU temp.\n",
+-	      cpu_temp_file.c_str());
+-      mConst.SetValue("tw_no_cpu_temp", "1");
+-    }
++  // CPU thermal zones may finish probing after the early defaults.
++  mConst.SetValue("tw_no_cpu_temp", "0");
+ #endif
+ #ifdef TW_CUSTOM_POWER_BUTTON
+   printf("TW_POWER_BUTTON := %s\n", EXPAND(TW_CUSTOM_POWER_BUTTON));
+@@ -1370,8 +1406,19 @@
    string findbright;
  #ifdef TW_BRIGHTNESS_PATH
    findbright = EXPAND(TW_BRIGHTNESS_PATH);
@@ -23,6 +111,49 @@ index f67a0ec..5255f26 100644
      {
        LOGINFO("Specified brightness file '%s' not found.\n",
  	      findbright.c_str());
+@@ -1564,32 +1611,17 @@
+ 		GetValue("tw_no_cpu_temp", tw_no_cpu_temp);
+ 		if (tw_no_cpu_temp == 1) return -1;
+ 
+-		string cpu_temp_file;
+-		static unsigned long convert_temp = 0;
+-		static time_t cpuSecCheck = 0;
+-		struct timeval curTime;
+-		string results;
+-
+-		gettimeofday(&curTime, NULL);
+-		if (curTime.tv_sec > cpuSecCheck)
+-		{
+-#ifdef TW_CUSTOM_CPU_TEMP_PATH
+-			cpu_temp_file = EXPAND(TW_CUSTOM_CPU_TEMP_PATH);
+-			if (TWFunc::read_file(cpu_temp_file, results) != 0)
+-				return -1;
+-#else
+-			cpu_temp_file = "/sys/class/thermal/thermal_zone0/temp";
+-			if (TWFunc::read_file(cpu_temp_file, results) != 0)
+-				return -1;
+-#endif
+-			convert_temp = strtoul(results.c_str(), NULL, 0) / 1000;
+-			if (convert_temp <= 0)
+-				convert_temp = strtoul(results.c_str(), NULL, 0);
+-			if (convert_temp >= 150)
+-				convert_temp = strtoul(results.c_str(), NULL, 0) / 10;
+-			cpuSecCheck = curTime.tv_sec + 5;
++		static std::string cpu_path;
++		static std::string cpu_display = "--";
++		static time_t next_sample = 0;
++		struct timespec now{};
++		clock_gettime(CLOCK_MONOTONIC, &now);
++		if (now.tv_sec >= next_sample) {
++			const long temp = GetRecoveryCpuTemperature(cpu_path);
++			cpu_display = temp ? std::to_string(temp / 1000) : "--";
++			next_sample = now.tv_sec + 5;
+ 		}
+-		value = TWFunc::to_string(convert_temp);
++		value = cpu_display;
+ 		return 0;
+ 	}
+ 	return -1;
 diff --git a/fox_fifo/fox_channel.cpp b/fox_fifo/fox_channel.cpp
 index d17c403..7228a9d 100644
 --- a/fox_fifo/fox_channel.cpp
