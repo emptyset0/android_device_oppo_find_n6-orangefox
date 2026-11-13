@@ -1631,3 +1631,31 @@ index 3691a2f..33ce101 100755
  		} else {
  			std::string binary_name("ui.xml");
  			ZipEntry64 binary_entry;
+diff --git a/partition.cpp b/partition.cpp
+--- a/partition.cpp
++++ b/partition.cpp
+@@ -2623,7 +2623,10 @@
+ 		PartitionManager.Remove_MTP_Storage(MTP_Storage_ID);
+ 
+ 	gui_msg(Msg("remove_all=Removing all files under '{1}'")(Mount_Point));
+-	TWFunc::removeDir(Mount_Point, true);
++	if (TWFunc::removeDir(Mount_Point, true) != 0) {
++		gui_msg(Msg(msg::kError, "unable_to_wipe=Unable to wipe {1}.")(Display_Name));
++		return false;
++	}
+ 	Recreate_AndSec_Folder();
+ 	return true;
+ }
+diff --git a/partitionmanager.cpp b/partitionmanager.cpp
+--- a/partitionmanager.cpp
++++ b/partitionmanager.cpp
+@@ -1989,7 +1989,8 @@
+ 	if (ret) {
+ 		#ifdef OF_WIPE_METADATA_AFTER_DATAFORMAT
+ 		usleep(2048);
+-		Wipe_By_Path("/metadata");
++		if (!Wipe_By_Path("/metadata"))
++			return false;
+ 		usleep(2048);
+ 		#endif
+ 		TWFunc::check_and_run_script(TW_FORMAT_DATA_SCRIPT, "Format Data Script");
