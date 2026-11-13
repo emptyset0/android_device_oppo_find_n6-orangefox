@@ -2,21 +2,10 @@
 
 The release uses a pinned Android 16 OrangeFox tree. The versions and patch paths are in `manifest/fox16.xml` and `manifest/project-pins.json`. Use a clean Ubuntu build host with the AOSP build prerequisites (including JDK 17, Python 3, and the `libdeflate0` package). Check out the device-tree commit recorded for the release; do not use a moving `main` to reproduce a tagged release.
 
-```sh
-mkdir fox16 && cd fox16
-# Set release_commit to the documented source SHA and manifest_ref to the matching tag.
-repo init -u https://github.com/emptyset0/android_device_oppo_find_n6-orangefox -m manifest/fox16.xml -b "$manifest_ref"
-repo sync -c
-git clone https://github.com/emptyset0/android_device_oppo_find_n6-orangefox device/oppo/swangoose
-git -C device/oppo/swangoose checkout "$release_commit"
-python3 device/oppo/swangoose/tools/apply-source.py "$PWD" /path/to/oem/boot.img
-source build/envsetup.sh
-source device/oppo/swangoose/vendorsetup.sh
-lunch twrp_swangoose-bp2a-eng
-m -j4 recovery
-```
+Follow the commands in the [README build section](../README.md#build). For a
+tagged release, use its tag for both the manifest and the device-tree checkout.
 
-`apply-source.py` applies the lock-screen CPU-temperature fix as part of the default Recovery patch and installs all supplemental headers. It extracts the pinned kernel from the matching OEM `boot.img`. The kernel runs from the device's existing boot partition, not from the packaged recovery. The raw AOSP `recoveryimage` is **not** the downloadable N6 image.
+`apply-source.py` applies the lock-screen CPU-temperature fix as part of the default Recovery patch and installs all supplemental headers. It extracts the pinned kernel from the matching OEM `boot.img`; the extracted kernel SHA-256 must be `e2efc9dcae2d180e22c85b5d760776b232178dfa758784cf94df3bc2df39147f`. The kernel runs from the device's existing boot partition, not from the packaged recovery. The raw AOSP `recoveryimage` is **not** the downloadable N6 image.
 
 The release is a **seed-based repack**, not a source-only reconstruction. It reuses the already integrated OEM runtime and other ramdisk files from the previous verified release. The allowed seed version, exact asset and SHA-256 are pinned in `manifest/release-seed.json`. `m recovery` does not package or publish; run the separate release command below.
 

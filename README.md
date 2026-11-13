@@ -31,7 +31,36 @@ On the tested setup, Canoe could back up, write and fully read back a single `re
 
 ## Build
 
-See [Build notes](docs/BUILD.md) for the pinned Fox 16 manifest, source patch application, OEM input, and the separate N6 recovery envelope step.
+Build on an x86-64 Linux host (Ubuntu or WSL2; keep the build tree on the
+Linux filesystem) with the Android build dependencies, JDK 17, Python 3
+available as both `python3` and `python`, and the Android `repo` tool.
+Provide the matching OEM `boot.img` described in the [build notes](docs/BUILD.md).
+
+```sh
+url=https://github.com/emptyset0/android_device_oppo_find_n6-orangefox.git
+ref=main                           # use the tag name for a versioned build
+manifest_ref=refs/heads/main       # for a release, use refs/tags/<tag>
+oem_boot=/absolute/path/to/oem/boot.img
+
+mkdir fox16 && cd fox16
+repo init --depth=1 -u "$url" -b "$manifest_ref" -m manifest/fox16.xml --no-clone-bundle
+repo sync -c -j4 --no-clone-bundle --no-tags
+git clone --branch "$ref" "$url" device/oppo/swangoose
+git -C device/oppo/swangoose checkout --detach "$(git -C .repo/manifests rev-parse HEAD)"
+python3 device/oppo/swangoose/tools/apply-source.py "$PWD" "$oem_boot"
+
+source build/envsetup.sh
+source device/oppo/swangoose/vendorsetup.sh
+lunch twrp_swangoose-bp2a-eng
+m -j2 recovery
+```
+
+The Recovery executable and display library are in
+`out/target/product/swangoose/recovery/root/system/` (under `bin/` and
+`lib64/`, respectively). This command **does not** produce the downloadable
+N6 image. Follow the [build and packaging guide](docs/BUILD.md) to build the
+device-specific HAL launcher and package the three outputs using the pinned
+release seed.
 
 ## Credits
 
