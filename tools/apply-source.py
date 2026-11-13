@@ -35,12 +35,20 @@ def main():
     blob = header[4096:4096 + length]
     if hashlib.sha256(blob).hexdigest() != 'e2efc9dcae2d180e22c85b5d760776b232178dfa758784cf94df3bc2df39147f':
         raise SystemExit('Boot kernel differs from the published build input; see the build notes.')
-    extra = tree / 'bootable/recovery/otg_sysfs_match.h'
-    if extra.exists():
-        raise SystemExit(f'Refusing to replace {extra}')
+    extra_inputs = {
+        'patches/otg_sysfs_match.h': 'bootable/recovery/otg_sysfs_match.h',
+        'patches/ce_inner_gcm.h': 'system/vold/ce_inner_gcm.h',
+    }
+    extra = []
+    for source, destination in extra_inputs.items():
+        target = tree / destination
+        if target.exists() or target.is_symlink():
+            raise SystemExit(f'Refusing to replace {target}')
+        extra.append((target, (repo / source).read_bytes()))
     for git, patch in patches:
         subprocess.run(git + ['apply', str(patch)], check=True)
-    extra.write_bytes((repo / 'patches/otg_sysfs_match.h').read_bytes())
+    for target, contents in extra:
+        target.write_bytes(contents)
     target = repo / 'prebuilt/kernel'
     target.parent.mkdir(exist_ok=True)
     target.write_bytes(blob)
