@@ -24,6 +24,7 @@
 
 #include "n6-family-compat/firmware_props.h"
 #include "n6-family-compat/firmware_props_android.inc"
+#include "n6-family-compat/qsee_mount_view.h"
 
 static int fail(const char *what) { perror(what); return 1; }
 
@@ -78,6 +79,18 @@ static int node(const char *path, uid_t uid, gid_t gid, mode_t mode) {
 
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
+    if (!strcmp(argv[1], "start-qsee")) {
+        /* Fox briefly mounts these while loading vendor modules. The QSEE
+         * jail uses the ramdisk's assets, not those logical filesystems.
+         * Drop the inherited references before the jail clones its view. */
+        static const char *const transient[] = {
+            "/vendor_dlkm", "/vendor", "/system_root", NULL,
+        };
+        if (n6_prepare_qsee_mount_view(transient))
+            return fail("N6 QSEE private firmware mount cleanup");
+        execl(ASSETS "/bin/qsee", "qsee", "start", (char *)NULL);
+        return fail("N6 QSEE launcher");
+    }
     if (!strcmp(argv[1], "prepare-properties")) {
         if (private_mounts() || use_firmware_properties())
             return fail("PLP110 firmware properties");

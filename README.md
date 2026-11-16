@@ -14,6 +14,7 @@ GitHub's automatic **Source code** archives do not contain the flashable image.
 | --- | --- |
 | Cover display and touch | Tested; inner panel is intentionally off by default. |
 | Data decryption and MTP | Native Fox/AOSP metadata and FBE; PIN and read/write MTP tested on PLP110. Android 17 metadata and CE decryption tested. |
+| Format Data | Tested on Android 17 with the standard F2FS format path (`tw_rm_rf=0`); `/data` and `/metadata` were reformatted, and Android plus Recovery booted afterward. The `rm -rf` option is not a substitute for removing encryption. |
 | ADB and FastbootD | Tested; the bootloader Fastboot is a separate Canoe/ABL feature. |
 | USB OTG, exFAT and NTFS | Both filesystem formats read on real OTG media. |
 | Backup and restore | Native paths tested with disposable targets; not a full user-data restore test. |

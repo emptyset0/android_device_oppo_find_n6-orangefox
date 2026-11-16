@@ -10,7 +10,7 @@ tagged release, use its tag for both the manifest and the device-tree checkout.
 The release is a **seed-based repack**, not a source-only reconstruction. It reuses the already integrated OEM runtime and other ramdisk files from the previous verified release. The allowed seed version, exact asset and SHA-256 are pinned in `manifest/release-seed.json`. `m recovery` does not package or publish; run the separate release command below.
 
 ```sh
-version=v0.1.3 # replace with the intended release version
+version=v0.1.4 # replace with the intended release version
 build_date=YYYYMMDD # build date in Asia/Taipei
 product_out=out/target/product/swangoose/recovery/root
 # Build the HAL as described in docs/CRYPTO-HAL.md using the pinned NDK.

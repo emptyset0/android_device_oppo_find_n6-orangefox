@@ -16,3 +16,14 @@ The Fox loader takes `nxp-nci.ko` from the active firmware, and the eSE
 launcher waits for its character device. Packaging removes the obsolete
 seed copy and replaces the seed startup script. A missing driver must not
 prevent KeyMint, metadata decryption, or Recovery itself from starting.
+
+Before entering the QSEE jail, the launcher drops inherited
+`/vendor_dlkm`, `/vendor` and `/system_root` mounts in a private view.
+This keeps Fox's transient module-loading mounts from pinning the logical
+devices during the native Format Data snapshot preflight.
+
+On the tested Android 17 firmware, the QSEE, KeyMint and Data decryption
+services remained available after this change. The standard F2FS Format Data
+path completed for both `/data` and `/metadata`, followed by successful
+Android and Recovery boots. The global `rm -rf` wipe option was off for that
+format test; it does not perform a filesystem format or remove encryption.
