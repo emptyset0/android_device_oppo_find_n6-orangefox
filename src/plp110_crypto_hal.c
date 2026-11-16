@@ -3,6 +3,7 @@
 #include <android/binder_ibinder.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <grp.h>
 #include <linux/capability.h>
 #include <sched.h>
@@ -18,13 +19,24 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "n6-family-compat/firmware_props.h"
-#include "n6-family-compat/firmware_props_android.inc"
-
 #define ASSETS "/system/libexec/plp110-fbe"
 #define RUN "/tmp/plp110-crypto"
 
+#include "n6-family-compat/firmware_props.h"
+#include "n6-family-compat/firmware_props_android.inc"
+
 static int fail(const char *what) { perror(what); return 1; }
+
+static int wait_for_nci(void) {
+    /* Fox's module loader runs in parallel with the init-started OEM stack. */
+    for (int i = 0; i < 50; ++i) {
+        struct stat st;
+        if (!stat("/dev/nq-nci", &st) && S_ISCHR(st.st_mode)) return 0;
+        usleep(100000);
+    }
+    fputs("N6: OEM eSE unavailable: /dev/nq-nci not ready after native module loading\n", stderr);
+    return 1;
+}
 
 static int private_mounts(void) {
     return unshare(CLONE_NEWNS) || mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
@@ -69,8 +81,7 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1], "prepare-properties")) {
         if (private_mounts() || use_firmware_properties())
             return fail("PLP110 firmware properties");
-        prepare_firmware_properties();
-        return 0;
+        return prepare_firmware_properties();
     }
     if (!strcmp(argv[1], "publish-keymint")) {
         if (wait_service("android.hardware.security.keymint.IKeyMintDevice/default"))
@@ -86,6 +97,7 @@ int main(int argc, char **argv) {
         program = "/vendor/bin/hw/android.hardware.security.onekeymint-service-qti";
         keymint = true;
     } else if (!strcmp(argv[1], "ese")) {
+        if (wait_for_nci()) return 1;
         program = "/odm/bin/hw/android.hardware.secure_element-service.qti";
         groups[1] = 1027;
         nfc = true;
