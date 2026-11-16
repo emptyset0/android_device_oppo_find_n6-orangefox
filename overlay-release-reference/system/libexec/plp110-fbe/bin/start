@@ -9,7 +9,6 @@ base=/system/libexec/plp110-fbe
 mkdir -p "$run/firmware" "$run/properties"
 slot="$(getprop ro.boot.slot_suffix)"
 mount -t vfat -o ro,nosuid,nodev,noexec,fmask=0133,dmask=0022 "/dev/block/bootdevice/by-name/modem$slot" "$run/firmware"
-if [ ! -d /sys/module/nxp_nci ]; then insmod "$base/modules/nxp-nci.ko" || true; fi
 # KeyMint must see the firmware SPL rather than the recovery build SPL.
 # The copy is private to KeyMint; the native Fox property area is untouched.
 cp -a /dev/__properties__/. "$run/properties/"

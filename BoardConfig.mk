@@ -55,6 +55,9 @@ BOARD_USES_QCOM_FBE_DECRYPTION := true
 TW_INCLUDE_CRYPTO := true
 TW_INCLUDE_CRYPTO_FBE := true
 TW_USE_FSCRYPT_POLICY := 2
+# Like lighthouse, use the active firmware's NFC/eSE driver before FBE.
+TW_LOAD_VENDOR_MODULES := "nxp-nci.ko"
+TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI := true
 TW_EXCLUDE_MTP :=
 TW_NO_HAPTICS := false
 TW_SUPPORT_INPUT_AIDL_HAPTICS := true

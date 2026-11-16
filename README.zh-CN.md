@@ -1,10 +1,12 @@
 # OPPO Find N6 OrangeFox Recovery
 
-这是 OPPO Find N6（设备代号 `swangoose`）的非官方 OrangeFox R12 移植，参考 Find X9 Ultra 的 OrangeFox 和原生流程。实测型号为 **PLP110**，系统为 CPH2765 APC A.40，使用兼容的 Canoe 启动链。其他 N6 型号只做了家族标识适配，不代表已验收。
+这是 OPPO Find N6（设备代号 `swangoose`）的非官方 OrangeFox R12 移植，参考 Find X9 Ultra 的 OrangeFox 和原生流程。实测型号为 **PLP110**，包括 CPH2765 Android 16 和 Android 17 固件，使用兼容的 Canoe 启动链。其他 N6 型号只做了家族标识适配，不代表已验收。
 
 **[在 Releases 下载可刷镜像](https://github.com/emptyset0/android_device_oppo_find_n6-orangefox/releases)**。请使用同一版本的校验文件和发布说明。GitHub 自动生成的 `Source code` 压缩包不含可刷镜像。镜像只用于目标 Recovery 槽，不是解锁包、转区包，也不改 GPT、ABL 或 EFISP。只有在你已确认有独立恢复路径时才刷入。
 
-已实测外屏、触摸、原生 PIN 解密、读写 MTP、OTG（NTFS/exFAT）、FastbootD、手电筒和振动；原生备份／恢复用专用测试目标验证过，同版本 APC OTA 通过，未验证跨版本 OTA。内屏默认关闭。带线重启有可能回落到 USB 2.0，Android 中也已复现。
+已实测外屏、触摸、原生 PIN 解密（包括 Android 17 metadata 与 CE）、读写 MTP、OTG（NTFS/exFAT）、FastbootD、手电筒和振动；原生备份／恢复用专用测试目标验证过，同版本 APC OTA 通过，未验证跨版本 OTA。内屏默认关闭。带线重启有可能回落到 USB 2.0，Android 中也已复现。
+
+eSE／Weaver 所需驱动由 Fox 从当前固件的模块分区加载，不在 Recovery ramdisk 中固定内置旧版 `.ko`。
 
 各版本的修复见对应发布说明。无内置安装包的 Magisk 选项会隐藏；实际安装了 Magisk 时仍可管理其模块。`magiskboot` 和「刷入当前 OrangeFox」保留。
 

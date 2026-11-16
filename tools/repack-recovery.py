@@ -18,6 +18,10 @@ SUMS = 'ramdisk-files.sha256sum'
 PROPS = 'prop.default'
 HAL = 'system/libexec/plp110-fbe/bin/hal'
 MINUI = 'system/lib64/libminuitwrp.so'
+CRYPTO_START = 'system/libexec/plp110-fbe/bin/start'
+OLD_NCI = 'system/libexec/plp110-fbe/modules/nxp-nci.ko'
+NATIVE_CRYPTO_START = (Path(__file__).resolve().parents[1] /
+                       'overlay-release-reference' / CRYPTO_START)
 RECOVERY_PRODUCT_PROP = re.compile(
     rb'ro\.product(?:\.(?:system|vendor|odm|product|system_ext|system_dlkm|vendor_dlkm|odm_dlkm))?'
     rb'\.(device|model|name)'
@@ -105,6 +109,7 @@ def main():
     parser.add_argument('--clean-menu', action='store_true', help='hide unbundled Magisk add-on choices')
     parser.add_argument('--crypto-hal', type=Path, help='replace the N6 OEM HAL launcher with a tested build')
     parser.add_argument('--minuitwrp', type=Path, help='replace the rebuilt minuitwrp DRM backend')
+    parser.add_argument('--native-nci', action='store_true', help='use firmware modules instead of bundling NCI')
     args = parser.parse_args()
     base = args.base_recovery.read_bytes()
     core = args.recovery_elf.read_bytes()
@@ -116,6 +121,14 @@ def main():
     by_name = {n: (f,d) for n,f,d,_ in records}
     assert len(by_name) == len(records) and core[:20] == by_name[CORE][1][:20] and core[:4] == b'\x7fELF'
     replacement = {CORE: core}
+    removed = set()
+    if args.native_nci:
+        if b'nxp-nci.ko\0' not in core or not args.crypto_hal:
+            parser.error('--native-nci requires the rebuilt core and crypto HAL')
+        assert CRYPTO_START in by_name
+        replacement[CRYPTO_START] = NATIVE_CRYPTO_START.read_bytes()
+        if OLD_NCI in by_name:
+            removed.add(OLD_NCI)
     if args.crypto_hal:
         hal = args.crypto_hal.read_bytes()
         old_hal = by_name[HAL][1]
@@ -135,11 +148,14 @@ def main():
         advanced = 'twres/pages/advanced.xml'
         replacement[advanced] = patch_advanced(by_name[advanced][1])
     checksums = b''.join(f'{sha(replacement.get(n, d))}  ./{n}\n'.encode()
-                         for n,f,d,_ in records if stat.S_ISREG(f[1]) and n not in (SUMS, PROPS))
+                         for n,f,d,_ in records if stat.S_ISREG(f[1]) and n not in (SUMS, PROPS)
+                         and n not in removed)
     replacement[SUMS] = checksums
-    cpio = b''.join(entry(n,f,replacement[n]) if n in replacement else raw for n,f,d,raw in records)
+    cpio = b''.join(entry(n,f,replacement[n]) if n in replacement else raw
+                    for n,f,d,raw in records if n not in removed)
     cpio = cpio.ljust(align(len(cpio),512), b'\0')
-    assert {n:d for n,_,d,_ in newc(cpio)} == {n:replacement.get(n,d) for n,(_,d) in by_name.items()}
+    assert {n:d for n,_,d,_ in newc(cpio)} == {
+        n:replacement.get(n,d) for n,(_,d) in by_name.items() if n not in removed}
     packed = b'\0'*4 + compress(cpio)
     end = align(START + len(packed), START)
     if end > LIMIT:

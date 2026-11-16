@@ -10,7 +10,7 @@ tagged release, use its tag for both the manifest and the device-tree checkout.
 The release is a **seed-based repack**, not a source-only reconstruction. It reuses the already integrated OEM runtime and other ramdisk files from the previous verified release. The allowed seed version, exact asset and SHA-256 are pinned in `manifest/release-seed.json`. `m recovery` does not package or publish; run the separate release command below.
 
 ```sh
-version=v0.1.2 # replace with the intended release version
+version=v0.1.3 # replace with the intended release version
 build_date=YYYYMMDD # build date in Asia/Taipei
 product_out=out/target/product/swangoose/recovery/root
 # Build the HAL as described in docs/CRYPTO-HAL.md using the pinned NDK.
@@ -27,5 +27,7 @@ python3 device/oppo/swangoose/tools/package-release.py \
 ```
 
 Use the Recovery copy of `libminuitwrp.so` from the same build as the executable. The release command requires all three payloads, verifies their packaged bytes, the complete ramdisk checksum ledger, the size limit and the preserved envelope, then writes the `.img`, `sha256sums.txt`, and `build-provenance.json`. The provenance records the device-tree commit, seed, OEM input, toolchain, and payload digests. It describes the supplied inputs; it is not a signed build attestation.
+
+Packaging also replaces the seed's eSE startup script and removes its old `nxp-nci.ko`; the rebuilt Recovery core must enable the native vendor-module loader.
 
 Publish these three files together with versioned notes identifying the asset, its SHA-256 and source commit. Recheck source preparation from a clean tree and verify the actual image before release. A byte-identical repack with the same inputs does not show that the OEM-dependent seed can be reconstructed from public source.

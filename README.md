@@ -6,14 +6,14 @@ Unofficial OrangeFox R12 port for OPPO Find N6. The device tree, source patches 
 
 GitHub's automatic **Source code** archives do not contain the flashable image.
 
-**Device codename:** `swangoose` (OPPO Find N6). **Tested variant:** PLP110, running CPH2765 APC A.40 with a compatible Canoe boot chain. The tree retains the stock OTA identifiers `PLP110`, `PLP120`, `CPH2765`, `OP61A9L1` and `OP6271L1`; that is not a claim of hardware testing on every regional model. This is a Recovery image, not a conversion ROM or a bootloader unlock package.
+**Device codename:** `swangoose` (OPPO Find N6). **Tested variant:** PLP110, including CPH2765 Android 16 and Android 17 firmware with a compatible Canoe boot chain. The tree retains the stock OTA identifiers `PLP110`, `PLP120`, `CPH2765`, `OP61A9L1` and `OP6271L1`; that is not a claim of hardware testing on every regional model. This is a Recovery image, not a conversion ROM or a bootloader unlock package.
 
 ## Working and validation status
 
 | Feature | Status |
 | --- | --- |
 | Cover display and touch | Tested; inner panel is intentionally off by default. |
-| Data decryption and MTP | Native Fox/AOSP metadata and FBE; PIN and read/write MTP tested on PLP110. |
+| Data decryption and MTP | Native Fox/AOSP metadata and FBE; PIN and read/write MTP tested on PLP110. Android 17 metadata and CE decryption tested. |
 | ADB and FastbootD | Tested; the bootloader Fastboot is a separate Canoe/ABL feature. |
 | USB OTG, exFAT and NTFS | Both filesystem formats read on real OTG media. |
 | Backup and restore | Native paths tested with disposable targets; not a full user-data restore test. |
@@ -22,6 +22,8 @@ GitHub's automatic **Source code** archives do not contain the flashable image.
 | KernelSU | Separate offline LKM image preparation only; not a built-in one-tap installer. See [KernelSU](docs/KERNELSU.md). |
 
 USB can fall back to High-Speed across reboots, including on Android. See the versioned release notes for fixes. Magisk add-on choices without a bundled installer are hidden; the installed Magisk module manager and `magiskboot` remain available.
+
+The eSE/Weaver driver is loaded by Fox from the current firmware's module partitions, not bundled as a fixed-version `.ko` in the Recovery ramdisk.
 
 ## Install and recover
 

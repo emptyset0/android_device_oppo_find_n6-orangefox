@@ -10,3 +10,9 @@ aarch64-linux-android34-clang -Os -Wall -Wextra -Werror -Wl,--strip-all \
 ```
 
 Pass `--crypto-hal crypto-hal` to the [release packaging command](BUILD.md).
+
+The release requires a rebuilt Recovery core with `TW_LOAD_VENDOR_MODULES`.
+The Fox loader takes `nxp-nci.ko` from the active firmware, and the eSE
+launcher waits for its character device. Packaging removes the obsolete
+seed copy and replaces the seed startup script. A missing driver must not
+prevent KeyMint, metadata decryption, or Recovery itself from starting.

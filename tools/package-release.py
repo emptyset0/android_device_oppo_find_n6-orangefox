@@ -29,7 +29,7 @@ def contents(image):
     return {n: (fields, data) for n, fields, data, _ in entries}
 
 
-def verify(seed, image, replacements):
+def verify(seed, image, replacements, removed=()):
     if not (len(seed) == len(image) == pack.SIZE and seed[:12] == image[:12]
             and seed[16:pack.START] == image[16:pack.START] and seed[pack.LIMIT:] == image[pack.LIMIT:]):
         raise ValueError("Recovery image envelope changed")
@@ -37,9 +37,11 @@ def verify(seed, image, replacements):
     if end > pack.LIMIT:
         raise ValueError("Packed ramdisk exceeds the firmware limit")
     old, new = contents(seed), contents(image)
-    if old.keys() != new.keys():
+    if old.keys() - set(removed) != new.keys():
         raise ValueError("Ramdisk file list changed")
     for name, (fields, data) in old.items():
+        if name in removed:
+            continue
         actual_fields, actual_data = new[name]
         if name not in replacements and name != pack.SUMS and (actual_fields, actual_data) != (fields, data):
             raise ValueError(f"Unexpected ramdisk change: {name}")
@@ -91,6 +93,8 @@ def main():
         ap.error("release HAL build requires Android NDK r29 (29.0.14206865)")
     inputs = {pack.CORE: a.core, pack.MINUI: a.minuitwrp, pack.HAL: a.crypto_hal}
     replacements = {name: path.read_bytes() for name, path in inputs.items()}
+    replacements[pack.CRYPTO_START] = pack.NATIVE_CRYPTO_START.read_bytes()
+    removed = {pack.OLD_NCI} & contents(seed).keys()
     source = version(["git", "-C", ROOT, "rev-parse", "HEAD"])
     if subprocess.check_output(["git", "-C", ROOT, "status", "--porcelain"], text=True).strip():
         ap.error("package from a clean device-tree commit")
@@ -99,6 +103,7 @@ def main():
         "seed": seed_info,
         "oem_boot_sha256": pack.sha(boot), "oem_kernel_sha256": kernel_sha,
         "inputs": {n: pack.sha(data) for n, data in replacements.items()},
+        "removed_seed_entries": sorted(removed),
         "toolchain": {"ndk_revision": ndk[1], "android_clang": version([a.android_clang, "--version"]),
                       "python": platform.python_version(),
                       "libdeflate_package": version(["dpkg-query", "-W", "-f=${Version}\n", "libdeflate0"])},
@@ -109,9 +114,10 @@ def main():
     with tempfile.TemporaryDirectory() as directory:
         image = Path(directory) / name
         subprocess.run([sys.executable, "-B", ROOT / "tools/repack-recovery.py", a.seed,
-                        a.core, image, "--minuitwrp", a.minuitwrp, "--crypto-hal", a.crypto_hal], check=True)
+                        a.core, image, "--minuitwrp", a.minuitwrp, "--crypto-hal", a.crypto_hal,
+                        "--native-nci"], check=True)
         result = image.read_bytes()
-        spare = verify(seed, result, replacements)
+        spare = verify(seed, result, replacements, removed)
         provenance.update(image=name, image_sha256=pack.sha(result), ramdisk_bytes_spare=spare)
         a.output_dir.mkdir()
         (a.output_dir / name).write_bytes(result)
