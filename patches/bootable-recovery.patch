@@ -2024,3 +2024,65 @@ diff --git a/partitionmanager.cpp b/partitionmanager.cpp
  		usleep(2048);
  		#endif
  		TWFunc::check_and_run_script(TW_FORMAT_DATA_SCRIPT, "Format Data Script");
+diff --git a/kernel_module_loader.cpp b/kernel_module_loader.cpp
+--- a/kernel_module_loader.cpp
++++ b/kernel_module_loader.cpp
+@@ -1,4 +1,6 @@
+ #include "kernel_module_loader.hpp"
++#include "n6_module_mount_worker.h"
++#include <cstring>
+ #include "common.h"
+ #include "variables.h"
+ #include "data.hpp"
+@@ -234,6 +236,21 @@
+ }
+ 
+ bool KernelModuleLoader::Load_Vendor_Modules() {
++	if (android::base::GetBoolProperty(TW_MODULES_MOUNTED_PROP, false))
++		return true;
++
++	bool loaded = false;
++	const int error = n6_module_mount::Run(Load_Vendor_Modules_In_Worker, loaded);
++	if (error != 0) {
++		LOGERR("Cannot isolate vendor module loader: %s\n", std::strerror(error));
++		return false;
++	}
++	if (loaded)
++		android::base::SetProperty(TW_MODULES_MOUNTED_PROP, "true");
++	return loaded;
++}
++
++bool KernelModuleLoader::Load_Vendor_Modules_In_Worker() {
+ 	// check /lib/modules (ramdisk vendor_boot)
+ 	// check /lib/modules/N.N (ramdisk vendor_boot)
+ 	// check /lib/modules/N.N-gki (ramdisk vendor_boot)
+@@ -242,9 +259,6 @@
+ 	// check /vendor/lib/modules/N.N (vendor mounted)
+ 	// check /vendor/lib/modules/N.N-gki (vendor mounted)
+ 	// check /vendor_dlkm/lib/modules (vendor_dlkm mounted)
+-
+-	if (android::base::GetBoolProperty(TW_MODULES_MOUNTED_PROP, false))
+-		return true;
+ 
+ 	int modules_loaded = 0;
+ #ifdef TW_INCLUDE_CRYPTO
+@@ -407,8 +421,6 @@
+ 
+ 	if (modules_loaded == 0)
+ 		DataManager::SetValue("of_request_switch_control_mode", "1");
+-
+-	android::base::SetProperty(TW_MODULES_MOUNTED_PROP, "true");
+ 
+ 	return true;
+ }
+diff --git a/kernel_module_loader.hpp b/kernel_module_loader.hpp
+--- a/kernel_module_loader.hpp
++++ b/kernel_module_loader.hpp
+@@ -37,6 +37,7 @@
+ 	static bool Load_Post_Decrypt_Modules();  // Load staged TW_POST_DECRYPT_MODULES after decryption succeeds
+ 
+ private:
++	static bool Load_Vendor_Modules_In_Worker();
+ 	static int Try_And_Load_Modules(std::string module_dir, bool vendor_is_mounted); // Use libmodprobe to attempt loading kernel modules
+ 	static bool Write_Module_List(std::string module_dir);                            // Write list of modules to load from TW_LOAD_VENDOR_MODULES
+ 	static bool Copy_Modules_To_Tmpfs(std::string module_dir);                        // Copy modules to ramdisk for loading

@@ -13,7 +13,7 @@ mount -t vfat -o ro,nosuid,nodev,noexec,fmask=0133,dmask=0022 "/dev/block/bootde
 # The copy is private to KeyMint; the native Fox property area is untouched.
 cp -a /dev/__properties__/. "$run/properties/"
 "$base/bin/hal" prepare-properties
-"$base/bin/hal" start-qsee >"$run/qsee.status" 2>&1 &
+"$base/bin/qsee" start >"$run/qsee.status" 2>&1 &
 qsee=$!
 trap 'kill "$qsee" 2>/dev/null || true' EXIT
 for unused in 1 2 3 4 5 6 7 8; do

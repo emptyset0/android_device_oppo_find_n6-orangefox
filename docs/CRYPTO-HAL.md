@@ -17,13 +17,17 @@ launcher waits for its character device. Packaging removes the obsolete
 seed copy and replaces the seed startup script. A missing driver must not
 prevent KeyMint, metadata decryption, or Recovery itself from starting.
 
-Before entering the QSEE jail, the launcher drops inherited
-`/vendor_dlkm`, `/vendor` and `/system_root` mounts in a private view.
-This keeps Fox's transient module-loading mounts from pinning the logical
-devices during the native Format Data snapshot preflight.
+Fox's early vendor-module loader runs synchronously in a short-lived
+worker with a private mount namespace. Its temporary mounts never enter
+the main Recovery mount view, so QSEE does not need a mountpoint denylist
+for module loading. The QSEE jail itself is unchanged.
 
-On the tested Android 17 firmware, the QSEE, KeyMint and Data decryption
-services remained available after this change. The standard F2FS Format Data
-path completed for both `/data` and `/metadata`, followed by successful
-Android and Recovery boots. The global `rm -rf` wipe option was off for that
-format test; it does not perform a filesystem format or remove encryption.
+The separate private HAL cleanup of `/metadata` is still needed: native
+FBE and Virtual A/B use it outside the module loader. The firmware-release
+reader also still unmounts the temporary mount it creates itself.
+
+The worker replacement was cold-boot tested on PLP110: module loading,
+QSEE/KeyMint, native Data decryption and read-write Data mount succeeded.
+The standard F2FS Format Data path then formatted `/data` and `/metadata`
+without errors (`operation_end - status=0`). Keep the global `rm -rf` option
+off for Format Data; it does not format a filesystem or remove encryption.

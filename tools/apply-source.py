@@ -37,6 +37,7 @@ def main():
         raise SystemExit('Boot kernel differs from the published build input; see the build notes.')
     extra_inputs = {
         'patches/otg_sysfs_match.h': 'bootable/recovery/otg_sysfs_match.h',
+        'patches/n6_module_mount_worker.h': 'bootable/recovery/n6_module_mount_worker.h',
         'patches/ce_inner_gcm.h': 'system/vold/ce_inner_gcm.h',
     }
     extra = []
